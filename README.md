@@ -51,4 +51,4 @@ MIT—see [LICENSE](LICENSE).
 - Based on [Liana](https://github.com/wizardsardine/liana) by Wizardsardine.
 - Inspired by [AnchorWatch](https://anchorwatch.com).
 ## Contact
-Open a GitHub issue or email <your-contact>.
+Open a GitHub issue.
