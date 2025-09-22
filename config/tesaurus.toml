@@ -1,0 +1,41 @@
+# Tesaurus Configuration File - Optimized for Performance
+
+[bitcoin]
+network = "testnet"
+rpc_url = "http://bitcoin:18332"
+rpc_user = "testuser"
+rpc_password = "testpass"
+confirmations = 1
+inactivity_blocks = 10
+
+[ai]
+model_path = "/data/tesaurus/models/tesaurus_ai.pkl"
+inference_timeout = "5s"
+batch_size = 32
+threads = 4
+use_gpu = false
+
+[storage]
+db_path = "/data/tesaurus/vault.db"
+cache_size_mb = 256
+compression = true
+backup_interval = 3600
+
+[network]
+timeout = "30s"
+pool_size = 10
+keep_alive = "90s"
+http2 = true
+
+[performance]
+worker_threads = 4
+enable_metrics = true
+metrics_port = 9090
+memory_cache_mb = 128
+enable_simd = true
+
+[logging]
+level = "info"
+file_path = "/logs/tesaurus.log"
+structured = true
+performance = true

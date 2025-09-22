@@ -1,0 +1,58 @@
+# Cargo configuration for performance optimizations
+
+[build]
+# Use all available CPU cores for compilation
+jobs = 0
+
+[target.x86_64-unknown-linux-gnu]
+# Use LLD linker for faster linking
+linker = "clang"
+rustflags = [
+    "-C", "link-arg=-fuse-ld=lld",
+    "-C", "target-cpu=native",      # Optimize for current CPU
+    "-C", "target-feature=+crt-static", # Static linking for better performance
+]
+
+[target.x86_64-pc-windows-msvc]
+rustflags = [
+    "-C", "target-cpu=native",
+    "-C", "link-arg=/LTCG",         # Link-time code generation
+]
+
+[target.x86_64-apple-darwin]
+rustflags = [
+    "-C", "target-cpu=native",
+]
+
+# Profile-guided optimization settings
+[profile.pgo]
+inherits = "release"
+lto = true
+codegen-units = 1
+
+# Benchmark profile
+[profile.bench]
+opt-level = 3
+lto = "thin"
+codegen-units = 1
+panic = "abort"
+
+# Development profile with some optimizations
+[profile.dev]
+opt-level = 1
+debug = true
+split-debuginfo = "unpacked"
+
+# Release profile with maximum optimizations
+[profile.release]
+opt-level = 3
+lto = true
+codegen-units = 1
+panic = "abort"
+strip = true
+debug = false
+
+# Environment variables for better performance
+[env]
+CARGO_PROFILE_RELEASE_BUILD_OVERRIDE_OPT_LEVEL = "3"
+RUSTC_BOOTSTRAP = "1"  # Enable unstable features if needed
