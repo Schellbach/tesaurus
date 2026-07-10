@@ -1,176 +1,26 @@
-# Docker Compose configuration for Tesaurus with performance optimizations
-version: '3.8'
-
 services:
-  tesaurus:
-    build: 
-      context: .
-      dockerfile: Dockerfile
-    container_name: tesaurus-vault
-    restart: unless-stopped
-    
-    # Performance optimizations
-    cpus: '2.0'
-    mem_limit: 1G
-    mem_reservation: 512M
-    
-    # Security
-    user: "1000:1000"
-    read_only: true
-    cap_drop:
-      - ALL
-    cap_add:
-      - NET_BIND_SERVICE
-    
-    # Volumes for persistent data
-    volumes:
-      - tesaurus_data:/data/tesaurus
-      - tesaurus_logs:/logs
-      - ./config/tesaurus.toml:/etc/tesaurus/tesaurus.toml:ro
-      - /tmp:/tmp  # Writable tmp directory
-    
-    # Network configuration
-    ports:
-      - "9090:9090"  # Metrics port
-    
-    # Environment variables
-    environment:
-      - RUST_LOG=info
-      - RUST_BACKTRACE=1
-      - TESAURUS_DB_PATH=/data/tesaurus/vault.db
-      - TESAURUS_LOG_PATH=/logs/tesaurus.log
-    
-    # Health check
-    healthcheck:
-      test: ["CMD", "curl", "-f", "http://localhost:9090/health"]
-      interval: 30s
-      timeout: 10s
-      retries: 3
-      start_period: 40s
-    
-    depends_on:
-      - redis
-      - bitcoin
-
-  # Redis for distributed caching
-  redis:
-    image: redis:7-alpine
-    container_name: tesaurus-redis
-    restart: unless-stopped
-    
-    # Performance tuning
-    command: redis-server --maxmemory 256mb --maxmemory-policy allkeys-lru
-    
-    # Security
-    user: "999:999"
-    read_only: true
-    
-    volumes:
-      - redis_data:/data
-      - /tmp:/tmp
-    
-    ports:
-      - "6379:6379"
-    
-    healthcheck:
-      test: ["CMD", "redis-cli", "ping"]
-      interval: 30s
-      timeout: 10s
-      retries: 3
-
-  # Bitcoin Core (testnet)
-  bitcoin:
-    image: ruimarinho/bitcoin-core:24
-    container_name: tesaurus-bitcoin
-    restart: unless-stopped
-    
-    # Resource limits
-    cpus: '1.0'
-    mem_limit: 2G
-    
-    volumes:
-      - bitcoin_data:/home/bitcoin/.bitcoin
-      - ./config/bitcoin.conf:/home/bitcoin/.bitcoin/bitcoin.conf:ro
-    
-    ports:
-      - "18332:18332"  # Testnet RPC
-      - "18333:18333"  # Testnet P2P
-    
-    command: >
-      bitcoind
-      -testnet
-      -server=1
-      -rpcbind=0.0.0.0
-      -rpcallowip=0.0.0.0/0
-      -rpcuser=testuser
-      -rpcpassword=testpass
-      -txindex=1
-      -zmqpubrawblock=tcp://0.0.0.0:28332
-      -zmqpubrawtx=tcp://0.0.0.0:28333
-    
-    healthcheck:
-      test: ["CMD", "bitcoin-cli", "-testnet", "getblockchaininfo"]
-      interval: 60s
-      timeout: 30s
-      retries: 3
-      start_period: 120s
-
-  # Prometheus for metrics collection
-  prometheus:
-    image: prom/prometheus:latest
-    container_name: tesaurus-prometheus
-    restart: unless-stopped
-    
-    volumes:
-      - ./config/prometheus.yml:/etc/prometheus/prometheus.yml:ro
-      - prometheus_data:/prometheus
-    
-    ports:
-      - "9091:9090"
-    
+  bitcoind:
+    image: bitcoin/bitcoin:28.0
+    container_name: tesaurus-bitcoind
     command:
-      - '--config.file=/etc/prometheus/prometheus.yml'
-      - '--storage.tsdb.path=/prometheus'
-      - '--web.console.libraries=/etc/prometheus/console_libraries'
-      - '--web.console.templates=/etc/prometheus/consoles'
-      - '--storage.tsdb.retention.time=30d'
-      - '--web.enable-lifecycle'
-
-  # Grafana for visualization
-  grafana:
-    image: grafana/grafana:latest
-    container_name: tesaurus-grafana
-    restart: unless-stopped
-    
-    volumes:
-      - grafana_data:/var/lib/grafana
-      - ./config/grafana/dashboards:/etc/grafana/provisioning/dashboards:ro
-      - ./config/grafana/datasources:/etc/grafana/provisioning/datasources:ro
-    
+      - -regtest
+      - -server
+      - -txindex
+      - -fallbackfee=0.0002
+      - -rpcuser=tesaurus
+      - -rpcpassword=changeme
+      - -rpcallowip=0.0.0.0/0
+      - -rpcbind=0.0.0.0
+      - -printtoconsole
     ports:
-      - "3000:3000"
-    
-    environment:
-      - GF_SECURITY_ADMIN_PASSWORD=admin123
-      - GF_USERS_ALLOW_SIGN_UP=false
+      - "18443:18443"
+    volumes:
+      - bitcoind-data:/home/bitcoin/.bitcoin
+    healthcheck:
+      test: ["CMD", "bitcoin-cli", "-regtest", "-rpcuser=tesaurus", "-rpcpassword=changeme", "getblockchaininfo"]
+      interval: 5s
+      timeout: 5s
+      retries: 20
 
 volumes:
-  tesaurus_data:
-    driver: local
-  tesaurus_logs:
-    driver: local
-  redis_data:
-    driver: local
-  bitcoin_data:
-    driver: local
-  prometheus_data:
-    driver: local
-  grafana_data:
-    driver: local
-
-networks:
-  default:
-    driver: bridge
-    ipam:
-      config:
-        - subnet: 172.20.0.0/16
+  bitcoind-data:

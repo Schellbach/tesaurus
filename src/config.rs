@@ -1,177 +1,184 @@
-//! Configuration management with performance optimizations
+//! Configuration for Tesaurus vault, daemon, and agent.
 
+use crate::error::{Error, Result};
+use bitcoin::Network;
 use serde::{Deserialize, Serialize};
-use std::path::PathBuf;
-use std::time::Duration;
+use std::fs;
+use std::path::{Path, PathBuf};
+use std::str::FromStr;
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Config {
-    /// Bitcoin network configuration
     pub bitcoin: BitcoinConfig,
-    /// agent engine configuration
+    pub vault: VaultConfig,
+    #[serde(default)]
     pub agent: AgentConfig,
-    /// Storage configuration
-    pub storage: StorageConfig,
-    /// Network configuration
-    pub network: NetworkConfig,
-    /// Performance configuration
-    pub performance: PerformanceConfig,
-    /// Logging configuration
-    pub logging: LoggingConfig,
+    #[serde(default)]
+    pub daemon: DaemonConfig,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct BitcoinConfig {
-    /// Bitcoin network (testnet, mainnet)
+    /// Network: mainnet | testnet | signet | regtest
     pub network: String,
-    /// RPC endpoint
+    /// Bitcoin Core cookie file, or leave empty and use user/password.
+    #[serde(default)]
+    pub cookie_path: Option<PathBuf>,
+    #[serde(default = "default_rpc_url")]
     pub rpc_url: String,
-    /// RPC username
-    pub rpc_user: String,
-    /// RPC password
-    pub rpc_password: String,
-    /// Number of confirmations required
-    pub confirmations: u32,
-    /// Inactivity threshold in blocks
-    pub inactivity_blocks: u32,
+    #[serde(default)]
+    pub rpc_user: Option<String>,
+    #[serde(default)]
+    pub rpc_password: Option<String>,
+    /// Bitcoin Core wallet name used as a watch-only backend.
+    #[serde(default = "default_wallet_name")]
+    pub wallet_name: String,
+}
+
+fn default_rpc_url() -> String {
+    "http://127.0.0.1:18443".into()
+}
+
+fn default_wallet_name() -> String {
+    "tesaurus".into()
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct VaultConfig {
+    /// Path to vault state JSON (descriptor + metadata).
+    pub state_path: PathBuf,
+    /// Relative timelock (CSV) in blocks before the agent path is available.
+    #[serde(default = "default_csv_blocks")]
+    pub csv_blocks: u32,
+    /// Directory for key material (WIF files). Keep offline / encrypted at rest.
+    pub keys_dir: PathBuf,
+}
+
+fn default_csv_blocks() -> u32 {
+    10
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct AgentConfig {
-    /// agent model path
-    pub model_path: PathBuf,
-    /// Inference timeout
-    pub inference_timeout: Duration,
-    /// Batch size for inference
-    pub batch_size: usize,
-    /// Number of threads for agent processing
-    pub threads: usize,
-    /// Enable GPU acceleration if available
-    pub use_gpu: bool,
+    /// Bind address for the agent co-signer HTTP API.
+    #[serde(default = "default_agent_bind")]
+    pub bind: String,
+    /// Path to agent WIF file.
+    pub key_path: PathBuf,
+    /// Optional bearer token required by the agent API.
+    #[serde(default)]
+    pub api_token: Option<String>,
+    /// Maximum amount (sats) the agent will co-sign in a single transaction.
+    #[serde(default = "default_max_amount")]
+    pub max_amount_sats: u64,
+    /// If non-empty, destinations must be in this allowlist.
+    #[serde(default)]
+    pub allowlist: Vec<String>,
+    /// Require CSV path to be mature before signing.
+    #[serde(default = "default_true")]
+    pub require_timelock: bool,
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct StorageConfig {
-    /// Database path
-    pub db_path: PathBuf,
-    /// Cache size in MB
-    pub cache_size_mb: usize,
-    /// Enable compression
-    pub compression: bool,
-    /// Backup interval in seconds
-    pub backup_interval: u64,
+fn default_agent_bind() -> String {
+    "127.0.0.1:18480".into()
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct NetworkConfig {
-    /// HTTP client timeout
-    pub timeout: Duration,
-    /// Connection pool size
-    pub pool_size: usize,
-    /// Keep-alive duration
-    pub keep_alive: Duration,
-    /// Enable HTTP/2
-    pub http2: bool,
+fn default_max_amount() -> u64 {
+    50_000_000 // 0.5 BTC
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct PerformanceConfig {
-    /// Number of worker threads
-    pub worker_threads: usize,
-    /// Enable metrics collection
-    pub enable_metrics: bool,
-    /// Metrics port
-    pub metrics_port: u16,
-    /// Memory cache size in MB
-    pub memory_cache_mb: usize,
-    /// Enable SIMD optimizations
-    pub enable_simd: bool,
+fn default_true() -> bool {
+    true
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct LoggingConfig {
-    /// Log level
-    pub level: String,
-    /// Log file path
-    pub file_path: Option<PathBuf>,
-    /// Enable structured logging
-    pub structured: bool,
-    /// Enable performance logging
-    pub performance: bool,
-}
-
-impl Default for Config {
+impl Default for AgentConfig {
     fn default() -> Self {
         Self {
-            bitcoin: BitcoinConfig {
-                network: "testnet".to_string(),
-                rpc_url: "http://127.0.0.1:18332".to_string(),
-                rpc_user: "testuser".to_string(),
-                rpc_password: "testpass".to_string(),
-                confirmations: 1,
-                inactivity_blocks: 10,
-            },
-            agent: AgentConfig {
-                model_path: PathBuf::from("./models/tesaurus_agent.bin"),
-                inference_timeout: Duration::from_secs(5),
-                batch_size: 32,
-                threads: num_cpus::get(),
-                use_gpu: false,
-            },
-            storage: StorageConfig {
-                db_path: PathBuf::from("./data/tesaurus.db"),
-                cache_size_mb: 256,
-                compression: true,
-                backup_interval: 3600, // 1 hour
-            },
-            network: NetworkConfig {
-                timeout: Duration::from_secs(30),
-                pool_size: 10,
-                keep_alive: Duration::from_secs(90),
-                http2: true,
-            },
-            performance: PerformanceConfig {
-                worker_threads: num_cpus::get(),
-                enable_metrics: true,
-                metrics_port: 9090,
-                memory_cache_mb: 128,
-                enable_simd: true,
-            },
-            logging: LoggingConfig {
-                level: "info".to_string(),
-                file_path: Some(PathBuf::from("./logs/tesaurus.log")),
-                structured: true,
-                performance: true,
-            },
+            bind: default_agent_bind(),
+            key_path: PathBuf::from("./keys/agent.wif"),
+            api_token: None,
+            max_amount_sats: default_max_amount(),
+            allowlist: Vec::new(),
+            require_timelock: true,
+        }
+    }
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct DaemonConfig {
+    #[serde(default = "default_poll_secs")]
+    pub poll_interval_secs: u64,
+    /// Optional URL of a local agent to request co-signatures from.
+    #[serde(default)]
+    pub agent_url: Option<String>,
+}
+
+fn default_poll_secs() -> u64 {
+    30
+}
+
+impl Default for DaemonConfig {
+    fn default() -> Self {
+        Self {
+            poll_interval_secs: default_poll_secs(),
+            agent_url: Some("http://127.0.0.1:18480".into()),
         }
     }
 }
 
 impl Config {
-    /// Load configuration from file with performance optimizations
-    pub fn load_from_file(path: &str) -> Result<Self, config::ConfigError> {
-        let settings = config::Config::builder()
-            .add_source(config::File::with_name(path))
-            .add_source(config::Environment::with_prefix("TESAURUS"))
-            .build()?;
-        
-        settings.try_deserialize()
+    pub fn load(path: impl AsRef<Path>) -> Result<Self> {
+        let raw = fs::read_to_string(path.as_ref())?;
+        let cfg: Self = toml::from_str(&raw).map_err(|e| Error::config(e.to_string()))?;
+        cfg.validate()?;
+        Ok(cfg)
     }
-    
-    /// Validate configuration for performance issues
-    pub fn validate(&self) -> Result<(), String> {
-        if self.performance.worker_threads == 0 {
-            return Err("Worker threads must be greater than 0".to_string());
+
+    pub fn network(&self) -> Result<Network> {
+        Network::from_str(&self.bitcoin.network)
+            .map_err(|_| Error::config(format!("invalid network '{}'", self.bitcoin.network)))
+    }
+
+    pub fn validate(&self) -> Result<()> {
+        self.network()?;
+        if self.vault.csv_blocks == 0 {
+            return Err(Error::config("vault.csv_blocks must be >= 1"));
         }
-        
-        if self.storage.cache_size_mb == 0 {
-            return Err("Cache size must be greater than 0".to_string());
+        if self.vault.csv_blocks > 65535 {
+            return Err(Error::config("vault.csv_blocks must fit in a 16-bit CSV value"));
         }
-        
-        if self.agent.batch_size == 0 {
-            return Err("agent batch size must be greater than 0".to_string());
-        }
-        
         Ok(())
+    }
+
+    pub fn example_toml(network: &str) -> String {
+        format!(
+            r#"# Tesaurus configuration
+
+[bitcoin]
+network = "{network}"
+rpc_url = "http://127.0.0.1:18332"
+rpc_user = "tesaurus"
+rpc_password = "changeme"
+wallet_name = "tesaurus"
+# cookie_path = "/home/bitcoin/.bitcoin/testnet3/.cookie"
+
+[vault]
+state_path = "./data/vault.json"
+keys_dir = "./keys"
+csv_blocks = 10
+
+[agent]
+bind = "127.0.0.1:18480"
+key_path = "./keys/agent.wif"
+# api_token = "replace-me"
+max_amount_sats = 50000000
+allowlist = []
+require_timelock = true
+
+[daemon]
+poll_interval_secs = 30
+agent_url = "http://127.0.0.1:18480"
+"#
+        )
     }
 }

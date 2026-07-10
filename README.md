@@ -1,54 +1,110 @@
 # Tesaurus
-**Tesaurus** is an open-source Bitcoin vault built on [Liana](https://github.com/wizardsardine/liana), blending self-sovereign custody with agent recovery. Inspired by AnchorWatch’s Trident Vault, it swaps their Isle of Man keyholder for a locally run agent as the preferred key holder. It’s a 2-of-3 multisig where the agent co-signs after a certain number of blocks of inactivity. We use 10 blocks/~2 hours on testnet.
-## Features
-- Sovereign: User controls all keys, agent is local.
-- Agent Recovery: Post-10 blocks, agent co-signs with primary key.
-- Override: Primary + override keys bypass agent.
-- Testnet: Runs on Bitcoin testnet.
-- Open-Source: Rust + Python, auditable.
-## How It Works
-- Pre-Inactivity: Primary + Override (Key 1 + Key 2).
-- Post-Inactivity: Primary + Agent Key after 10 blocks.
-- Sovereignty: Override stays active; Agent Key backup ensures recovery.
+
+Sovereign Bitcoin vault with a **local agent** recovery co-signer.
+
+Tesaurus encodes a decaying 2-of-3 policy on-chain with [Miniscript](https://bitcoin.sipa.be/miniscript/):
+
+```text
+thresh(2, pk(primary), pk(override), and(pk(agent), older(csv)))
+```
+
+| Path | Keys | When |
+|------|------|------|
+| Primary | primary + override | Always |
+| Recovery | primary + agent (or any other 2-of-3) | After `csv` confirmations on the coin |
+
+The agent is a local process you run. It holds the agent key and will only co-sign when its policy allows (timelock mature, amount caps, optional allowlist).
+
+## Status
+
+This is a working vault implementation (descriptor, signing, Bitcoin Core watch-only sync, agent HTTP co-signer). Use **testnet/regtest** first. Mainnet requires your own operational security review — see [SECURITY.md](SECURITY.md).
+
 ## Prerequisites
-- Bitcoin Core: Testnet node (v24.0+).
-- Rust: Stable (rustup update).
-- Python: 3.8+ (pip install bitcoinlib scikit-learn).
-- Hardware: Laptop or Raspberry Pi.
-## Installation
-1. Clone Repository: git clone https://github.com/<your-username>/tesaurus.git, then cd tesaurus.
-2. Build the Rust Backend: cargo build --release.
-3. Set Up Bitcoin Testnet: Config (~/.bitcoin/bitcoin.conf): testnet=1, server=1, rpcuser=testuser, rpcpassword=testpass, txindex=1. Start: bitcoind -testnet -daemon.
-## Configuration
-1. Generate Keys:
-   - Primary (Key 1): bitcoin-cli -testnet getnewaddress, export WIF with dumpprivkey.
-   - Override (Key 2): Same process.
-   - Agent Key: Generate, export WIF (e.g., tprvAI...).
-2. Update Agent Module: Edit agent_vault.py, set agent = OptimizedAgentEngine("tprvAI...").
-3. Set Up Wallet: Run cargo run --release --bin liana-gui --network testnet, input pubkeys for Key 1, Key 2, Agent Key (from getaddressinfo), save address (e.g., tb1qvault...).
-## Usage
-1. Start agent: python agent_vault.py &.
-2. Run Daemon: cargo run --release --bin lianad --network testnet --rpcuser=testuser --rpcpassword=testpass.
-3. Fund Vault: Send 1 tBTC from coinfaucet.eu/en/btc-testnet to tb1qvault....
-4. Spend:
-   - Pre-Inactivity: Use Liana GUI/CLI with Key 1 + Key 2.
-   - Post-Inactivity: Wait 10 blocks (bitcoin-cli -testnet generate 10), send with Key 1—agent co-signs.
-## Testing
-Test cases:
-1. Pre-Inactivity: Send 0.1 tBTC with Key 1 + Key 2. *Expect*: Instant, agent dormant.
-2. Post-Inactivity: Generate 10 blocks (bitcoin-cli -testnet generate 10), send 0.6 tBTC with Key 1. *Expect*: agent signs, tx succeeds.
-3. Override: Post-10 blocks, kill agent (pkill python), send 0.3 tBTC with Key 1 + Key 2. *Expect*: Tx succeeds.
-4. Manual Recovery: Post-10 blocks, use Agent Key WIF (bitcoin-cli -testnet signrawtransactionwithkey). *Expect*: Tx succeeds.
-## Sovereignty Guarantee
-- No Third Parties: Agent is local, replaces AnchorWatch’s keyholder.
-- User Control: You manage all keys.
-- Override: Key 1 + Key 2 always works.
-## Contributing
-Fork, submit PRs (e.g., mainnet timers), audit: src/wallet.rs, src/descriptor.rs, agent_vault.py.
+
+- Rust 1.85+
+- Bitcoin Core 25+ with RPC (wallet support)
+- Linux/macOS recommended
+
+## Quick start (regtest)
+
+```bash
+# 1. Bitcoin Core regtest
+docker compose up -d bitcoind
+bitcoin-cli -regtest -rpcuser=tesaurus -rpcpassword=changeme createwallet miner
+bitcoin-cli -regtest -rpcuser=tesaurus -rpcpassword=changeme -rpcwallet=miner \
+  -generate 101
+
+# 2. Build Tesaurus
+cargo build --release
+
+# 3. Configure + keys + vault
+cp config/tesaurus.regtest.toml config/tesaurus.toml
+./target/release/tesaurus -c config/tesaurus.toml keys generate
+./target/release/tesaurus -c config/tesaurus.toml init-vault
+./target/release/tesaurus -c config/tesaurus.toml import-watch
+ADDR=$(./target/release/tesaurus -c config/tesaurus.toml address | head -1)
+
+# 4. Fund vault
+bitcoin-cli -regtest -rpcuser=tesaurus -rpcpassword=changeme -rpcwallet=miner \
+  sendtoaddress "$ADDR" 1
+bitcoin-cli -regtest -rpcuser=tesaurus -rpcpassword=changeme -rpcwallet=miner -generate 1
+
+# 5. Primary spend (primary + override)
+./target/release/tesaurus -c config/tesaurus.toml status
+DEST=$(bitcoin-cli -regtest -rpcuser=tesaurus -rpcpassword=changeme -rpcwallet=miner getnewaddress)
+./target/release/tesaurus -c config/tesaurus.toml spend \
+  --to "$DEST" --amount-sats 100000 --fee-sats 1000 --path primary --broadcast
+
+# 6. Recovery spend after CSV maturity
+bitcoin-cli -regtest -rpcuser=tesaurus -rpcpassword=changeme -rpcwallet=miner -generate 10
+./target/release/tesaurus-agent -c config/tesaurus.toml &
+./target/release/tesaurus -c config/tesaurus.toml spend \
+  --to "$DEST" --amount-sats 50000 --fee-sats 1000 --path recovery --via-agent --broadcast
+```
+
+## Commands
+
+| Command | Purpose |
+|---------|---------|
+| `tesaurus init-config` | Write example `tesaurus.toml` |
+| `tesaurus keys generate` | Create primary / override / agent WIF files |
+| `tesaurus init-vault` | Compile miniscript descriptor + save vault state |
+| `tesaurus import-watch` | Import descriptor into Bitcoin Core (watch-only) |
+| `tesaurus address` | Print receive address + descriptor |
+| `tesaurus status` | Balances / UTXOs / CSV maturity |
+| `tesaurus spend` | Build, sign, optionally broadcast |
+| `tesaurus-agent` | Run local agent co-signer HTTP API |
+
+## Architecture
+
+```text
+┌─────────────┐     watch-only      ┌──────────────┐
+│  tesaurus   │◄───────────────────►│ Bitcoin Core │
+│  CLI/wallet │   listunspent /     │  (RPC)       │
+└──────┬──────┘   sendrawtransaction└──────────────┘
+       │
+       │ primary path: sign with primary+override locally
+       │ recovery path: POST /v1/sign ──► tesaurus-agent
+       ▼
+┌─────────────────┐
+│ tesaurus-agent  │  holds agent.wif, enforces policy
+└─────────────────┘
+```
+
+## Production notes
+
+- Prefer cookie auth over password RPC where possible.
+- Set a strong `agent.api_token` and bind the agent to localhost (or a private network).
+- Increase `csv_blocks` for mainnet (e.g. weeks/months), not 10 blocks.
+- Back up `data/vault.json` (descriptor) and all three WIF files separately.
+- The descriptor alone cannot spend funds; losing keys without backup is permanent loss.
+- `--via-agent` currently sends the primary WIF to the agent over HTTP for co-signing. Only use on localhost with a token, or use local recovery (`--path recovery` without `--via-agent`) so both keys stay on one machine.
+
 ## License
-MIT—see [LICENSE](LICENSE).
+
+MIT — see [LICENSE](LICENSE).
+
 ## Acknowledgments
-- Based on [Liana](https://github.com/wizardsardine/liana) by Wizardsardine.
-- Inspired by [AnchorWatch](https://anchorwatch.com).
-## Contact
-Open a GitHub issue.
+
+- Inspired by [Liana](https://github.com/wizardsardine/liana) (Wizardsardine) and AnchorWatch-style recovery keyholders.
+- Built on [rust-bitcoin](https://github.com/rust-bitcoin/rust-bitcoin) and [rust-miniscript](https://github.com/rust-bitcoin/rust-miniscript).
