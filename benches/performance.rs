@@ -4,7 +4,7 @@ use criterion::{black_box, criterion_group, criterion_main, Criterion, Benchmark
 use tesaurus::{
     Config,
     crypto::CryptoManager,
-    ai::{AIEngine, TransactionContext},
+    agent::{AgentEngine, TransactionContext},
     storage::StorageManager,
 };
 use bitcoin::{PrivateKey, Network};
@@ -91,15 +91,15 @@ fn benchmark_crypto_operations(c: &mut Criterion) {
     group.finish();
 }
 
-fn benchmark_ai_decisions(c: &mut Criterion) {
+fn benchmark_agent_decisions(c: &mut Criterion) {
     let rt = Runtime::new().unwrap();
     let config = Config::default();
-    let ai_engine = rt.block_on(async {
-        Arc::new(AIEngine::new(&config).await.unwrap())
+    let agent_engine = rt.block_on(async {
+        Arc::new(AgentEngine::new(&config).await.unwrap())
     });
 
-    let mut group = c.benchmark_group("ai");
-    group.sample_size(100); // Reduce sample size for AI benchmarks
+    let mut group = c.benchmark_group("agent");
+    group.sample_size(100); // Reduce sample size for agent benchmarks
     
     // Create test contexts with varying complexity
     let simple_context = TransactionContext {
@@ -117,7 +117,7 @@ fn benchmark_ai_decisions(c: &mut Criterion) {
         inactivity_duration: Duration::from_secs(3600 * 48), // 48 hours
         fee_rate: 50,
         historical_patterns: (0..100).map(|i| {
-            tesaurus::ai::TransactionPattern {
+            tesaurus::agent::TransactionPattern {
                 amount: 10000000 + (i * 1000000),
                 frequency: 0.1 + (i as f64 * 0.001),
                 time_of_day: (i % 24) as u8,
@@ -127,17 +127,17 @@ fn benchmark_ai_decisions(c: &mut Criterion) {
         block_height: 800100,
     };
 
-    // Benchmark AI decision making with different context complexity
+    // Benchmark agent decision making with different context complexity
     group.bench_function("decision_simple_context", |b| {
         b.to_async(&rt).iter(|| async {
-            let decision = ai_engine.make_decision(&simple_context).await.unwrap();
+            let decision = agent_engine.make_decision(&simple_context).await.unwrap();
             black_box(decision);
         });
     });
 
     group.bench_function("decision_complex_context", |b| {
         b.to_async(&rt).iter(|| async {
-            let decision = ai_engine.make_decision(&complex_context).await.unwrap();
+            let decision = agent_engine.make_decision(&complex_context).await.unwrap();
             black_box(decision);
         });
     });
@@ -146,11 +146,11 @@ fn benchmark_ai_decisions(c: &mut Criterion) {
     group.bench_function("decision_cached", |b| {
         // Warm up cache
         rt.block_on(async {
-            ai_engine.make_decision(&simple_context).await.unwrap();
+            agent_engine.make_decision(&simple_context).await.unwrap();
         });
         
         b.to_async(&rt).iter(|| async {
-            let decision = ai_engine.make_decision(&simple_context).await.unwrap();
+            let decision = agent_engine.make_decision(&simple_context).await.unwrap();
             black_box(decision);
         });
     });
@@ -167,7 +167,7 @@ fn benchmark_ai_decisions(c: &mut Criterion) {
 
     group.bench_function("batch_decisions_10", |b| {
         b.to_async(&rt).iter(|| async {
-            let decisions = ai_engine.batch_decisions(&batch_contexts).await.unwrap();
+            let decisions = agent_engine.batch_decisions(&batch_contexts).await.unwrap();
             black_box(decisions);
         });
     });
@@ -238,11 +238,11 @@ fn benchmark_end_to_end_transaction(c: &mut Criterion) {
     let rt = Runtime::new().unwrap();
     let config = Config::default();
     
-    let (crypto, ai_engine, storage) = rt.block_on(async {
+    let (crypto, agent_engine, storage) = rt.block_on(async {
         let crypto = Arc::new(CryptoManager::new(&config).await.unwrap());
-        let ai_engine = Arc::new(AIEngine::new(&config).await.unwrap());
+        let agent_engine = Arc::new(AgentEngine::new(&config).await.unwrap());
         let storage = Arc::new(StorageManager::new(&config).await.unwrap());
-        (crypto, ai_engine, storage)
+        (crypto, agent_engine, storage)
     });
 
     let mut group = c.benchmark_group("end_to_end");
@@ -254,13 +254,13 @@ fn benchmark_end_to_end_transaction(c: &mut Criterion) {
             // 1. Generate keys
             let primary_key = crypto.generate_private_key().unwrap();
             let override_key = crypto.generate_private_key().unwrap();
-            let ai_key = crypto.generate_private_key().unwrap();
+            let agent_key = crypto.generate_private_key().unwrap();
             
             // 2. Create multisig address
             let pubkeys = vec![
                 crypto.derive_public_key(&primary_key).unwrap(),
                 crypto.derive_public_key(&override_key).unwrap(),
-                crypto.derive_public_key(&ai_key).unwrap(),
+                crypto.derive_public_key(&agent_key).unwrap(),
             ];
             let address = crypto.create_multisig_address(&pubkeys, 2).unwrap();
             
@@ -274,8 +274,8 @@ fn benchmark_end_to_end_transaction(c: &mut Criterion) {
                 block_height: 800000,
             };
             
-            // 4. Get AI decision
-            let decision = ai_engine.make_decision(&context).await.unwrap();
+            // 4. Get agent decision
+            let decision = agent_engine.make_decision(&context).await.unwrap();
             
             // 5. Store transaction record
             let tx_record = tesaurus::storage::PendingTransaction {
@@ -283,7 +283,7 @@ fn benchmark_end_to_end_transaction(c: &mut Criterion) {
                 amount: context.amount,
                 destination: context.destination.clone(),
                 created_at: std::time::Instant::now(),
-                ai_decision: Some(format!("{:?}", decision.decision)),
+                agent_decision: Some(format!("{:?}", decision.decision)),
             };
             storage.store_transaction(&tx_record).await.unwrap();
             
@@ -297,17 +297,17 @@ fn benchmark_end_to_end_transaction(c: &mut Criterion) {
 fn benchmark_concurrent_operations(c: &mut Criterion) {
     let rt = Runtime::new().unwrap();
     let config = Config::default();
-    let ai_engine = rt.block_on(async {
-        Arc::new(AIEngine::new(&config).await.unwrap())
+    let agent_engine = rt.block_on(async {
+        Arc::new(AgentEngine::new(&config).await.unwrap())
     });
 
     let mut group = c.benchmark_group("concurrent");
     group.sample_size(20);
     
-    // Test concurrent AI decisions
+    // Test concurrent agent decisions
     for concurrency in [1, 2, 4, 8, 16] {
         group.bench_with_input(
-            BenchmarkId::new("ai_decisions", concurrency),
+            BenchmarkId::new("agent_decisions", concurrency),
             &concurrency,
             |b, &concurrency| {
                 b.to_async(&rt).iter(|| async {
@@ -321,7 +321,7 @@ fn benchmark_concurrent_operations(c: &mut Criterion) {
                     }).collect();
                     
                     let futures: Vec<_> = contexts.iter()
-                        .map(|ctx| ai_engine.make_decision(ctx))
+                        .map(|ctx| agent_engine.make_decision(ctx))
                         .collect();
                     
                     let decisions = futures::future::try_join_all(futures).await.unwrap();
@@ -337,7 +337,7 @@ fn benchmark_concurrent_operations(c: &mut Criterion) {
 criterion_group!(
     benches,
     benchmark_crypto_operations,
-    benchmark_ai_decisions,
+    benchmark_agent_decisions,
     benchmark_storage_operations,
     benchmark_end_to_end_transaction,
     benchmark_concurrent_operations

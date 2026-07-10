@@ -119,7 +119,7 @@ fmt:
 	$(CARGO) fmt
 	@echo "🐍 Formatting Python code..."
 	@if command -v black >/dev/null 2>&1; then \
-		black ai_vault.py scripts/; \
+		black agent_vault.py scripts/; \
 	else \
 		echo "⚠️  black not available for Python formatting"; \
 	fi
@@ -130,7 +130,7 @@ lint:
 	$(CARGO) clippy -- -D warnings
 	@echo "🐍 Running Python linter..."
 	@if command -v flake8 >/dev/null 2>&1; then \
-		flake8 ai_vault.py scripts/; \
+		flake8 agent_vault.py scripts/; \
 	else \
 		echo "⚠️  flake8 not available for Python linting"; \
 	fi

@@ -74,7 +74,7 @@ pub struct PendingTransaction {
     pub amount: u64,
     pub destination: String,
     pub created_at: Instant,
-    pub ai_decision: Option<String>,
+    pub agent_decision: Option<String>,
 }
 
 impl StorageManager {
@@ -117,7 +117,7 @@ impl StorageManager {
                 amount INTEGER NOT NULL,
                 destination TEXT NOT NULL,
                 created_at INTEGER NOT NULL,
-                ai_decision TEXT,
+                agent_decision TEXT,
                 status TEXT NOT NULL DEFAULT 'pending'
             )
         "#, [])?;
@@ -251,14 +251,14 @@ impl StorageManager {
         
         conn.execute(
             r#"INSERT OR REPLACE INTO transactions 
-               (txid, amount, destination, created_at, ai_decision) 
+               (txid, amount, destination, created_at, agent_decision) 
                VALUES (?1, ?2, ?3, ?4, ?5)"#,
             rusqlite::params![
                 tx.txid,
                 tx.amount as i64,
                 tx.destination,
                 tx.created_at.duration_since(std::time::UNIX_EPOCH).unwrap().as_secs() as i64,
-                tx.ai_decision.as_deref()
+                tx.agent_decision.as_deref()
             ]
         )?;
         
@@ -275,11 +275,11 @@ impl StorageManager {
         let conn = self.sql_db.lock();
         
         let query = if let Some(status) = status_filter {
-            "SELECT txid, amount, destination, created_at, ai_decision 
+            "SELECT txid, amount, destination, created_at, agent_decision 
              FROM transactions WHERE status = ?1 
              ORDER BY created_at DESC LIMIT ?2 OFFSET ?3"
         } else {
-            "SELECT txid, amount, destination, created_at, ai_decision 
+            "SELECT txid, amount, destination, created_at, agent_decision 
              FROM transactions 
              ORDER BY created_at DESC LIMIT ?1 OFFSET ?2"
         };
@@ -293,7 +293,7 @@ impl StorageManager {
                     amount: row.get::<_, i64>(1)? as u64,
                     destination: row.get(2)?,
                     created_at: std::time::UNIX_EPOCH + Duration::from_secs(row.get::<_, i64>(3)? as u64),
-                    ai_decision: row.get(4)?,
+                    agent_decision: row.get(4)?,
                 })
             })?
         } else {
@@ -303,7 +303,7 @@ impl StorageManager {
                     amount: row.get::<_, i64>(1)? as u64,
                     destination: row.get(2)?,
                     created_at: std::time::UNIX_EPOCH + Duration::from_secs(row.get::<_, i64>(3)? as u64),
-                    ai_decision: row.get(4)?,
+                    agent_decision: row.get(4)?,
                 })
             })?
         };

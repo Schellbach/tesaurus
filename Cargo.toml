@@ -3,7 +3,7 @@ name = "tesaurus"
 version = "0.1.0"
 edition = "2021"
 authors = ["Tesaurus Team"]
-description = "A performance-optimized Bitcoin vault with AI recovery"
+description = "A performance-optimized Bitcoin vault with agent recovery"
 license = "MIT"
 
 # Performance optimizations at package level

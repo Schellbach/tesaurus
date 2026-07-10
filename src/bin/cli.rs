@@ -3,7 +3,7 @@
 use tesaurus::{
     Config, TesaurusVault, Result,
     crypto::CryptoManager,
-    ai::AIEngine,
+    agent::AgentEngine,
     storage::StorageManager,
     network::NetworkManager,
     vault::{VaultManager, TransactionParams},
@@ -37,10 +37,10 @@ async fn main() -> Result<()> {
                         .required(true)
                 )
                 .arg(
-                    Arg::new("ai-key")
-                        .long("ai-key")
+                    Arg::new("agent-key")
+                        .long("agent-key")
                         .value_name("WIF")
-                        .help("AI private key in WIF format")
+                        .help("Agent private key in WIF format")
                         .required(true)
                 )
         )
@@ -69,9 +69,9 @@ async fn main() -> Result<()> {
                         .default_value("25")
                 )
                 .arg(
-                    Arg::new("use-ai")
-                        .long("use-ai")
-                        .help("Use AI for decision making")
+                    Arg::new("use-agent")
+                        .long("use-agent")
+                        .help("Use agent for decision making")
                         .action(clap::ArgAction::SetTrue)
                 )
                 .arg(
@@ -119,7 +119,7 @@ async fn main() -> Result<()> {
 
     // Initialize components
     let crypto_manager = Arc::new(CryptoManager::new(&config).await?);
-    let ai_engine = Arc::new(AIEngine::new(&config).await?);
+    let agent_engine = Arc::new(AgentEngine::new(&config).await?);
     let storage_manager = Arc::new(StorageManager::new(&config).await?);
     let network_manager = Arc::new(NetworkManager::new(&config).await?);
 
@@ -127,7 +127,7 @@ async fn main() -> Result<()> {
     let vault_manager = Arc::new(VaultManager::new(
         config,
         crypto_manager,
-        ai_engine,
+        agent_engine,
         storage_manager,
     ).await?);
 
@@ -167,18 +167,18 @@ async fn handle_init(
 
     let primary_wif = matches.get_one::<String>("primary-key").unwrap();
     let override_wif = matches.get_one::<String>("override-key").unwrap();
-    let ai_wif = matches.get_one::<String>("ai-key").unwrap();
+    let agent_wif = matches.get_one::<String>("agent-key").unwrap();
 
     // Parse private keys
     let primary_key = PrivateKey::from_wif(primary_wif)
         .map_err(|e| tesaurus::error::TesaurusError::crypto("Invalid primary key"))?;
     let override_key = PrivateKey::from_wif(override_wif)
         .map_err(|e| tesaurus::error::TesaurusError::crypto("Invalid override key"))?;
-    let ai_key = PrivateKey::from_wif(ai_wif)
-        .map_err(|e| tesaurus::error::TesaurusError::crypto("Invalid AI key"))?;
+    let agent_key = PrivateKey::from_wif(agent_wif)
+        .map_err(|e| tesaurus::error::TesaurusError::crypto("Invalid agent key"))?;
 
     // Initialize vault
-    let address = vault_manager.initialize_keys(primary_key, override_key, ai_key).await?;
+    let address = vault_manager.initialize_keys(primary_key, override_key, agent_key).await?;
 
     println!("✅ Vault initialized successfully!");
     println!("📍 Multisig address: {}", address);
@@ -196,7 +196,7 @@ async fn handle_send(
     let destination_str = matches.get_one::<String>("destination").unwrap();
     let amount_str = matches.get_one::<String>("amount").unwrap();
     let fee_rate_str = matches.get_one::<String>("fee-rate").unwrap();
-    let use_ai = matches.get_flag("use-ai");
+    let use_agent = matches.get_flag("use-agent");
     let priority = matches.get_one::<String>("priority").unwrap();
 
     // Parse parameters
@@ -212,7 +212,7 @@ async fn handle_send(
         destination,
         amount: amount_sats,
         fee_rate,
-        use_ai,
+        use_agent,
         priority: priority.to_string(),
     };
 
@@ -224,7 +224,7 @@ async fn handle_send(
     println!("✅ Transaction created successfully!");
     println!("🔗 Transaction ID: {}", txid);
     println!("⚡ Processing time: {:.2}ms", duration.as_millis());
-    println!("🤖 AI decision: {}", if use_ai { "Enabled" } else { "Disabled" });
+    println!("🤖 Agent decision: {}", if use_agent { "Enabled" } else { "Disabled" });
 
     Ok(())
 }
@@ -245,8 +245,8 @@ async fn handle_status(vault_manager: Arc<VaultManager>) -> Result<()> {
     println!("\n📈 Performance Metrics");
     println!("======================");
     println!("🔄 Transactions Processed: {}", metrics.transactions_processed);
-    println!("✅ AI Approvals: {}", metrics.ai_approvals);
-    println!("❌ AI Rejections: {}", metrics.ai_rejections);
+    println!("✅ Agent Approvals: {}", metrics.agent_approvals);
+    println!("❌ Agent Rejections: {}", metrics.agent_rejections);
     println!("👤 Manual Overrides: {}", metrics.manual_overrides);
     println!("⚡ Avg Processing Time: {:.2}ms", metrics.avg_processing_time_ms);
     println!("🕐 Inactivity Duration: {:.1}h", metrics.inactivity_duration_hours);
@@ -265,8 +265,8 @@ async fn handle_metrics(vault_manager: Arc<VaultManager>) -> Result<()> {
     println!("│ Metric                          │ Value        │");
     println!("├─────────────────────────────────┼──────────────┤");
     println!("│ Transactions Processed         │ {:>12} │", metrics.transactions_processed);
-    println!("│ AI Approvals                    │ {:>12} │", metrics.ai_approvals);
-    println!("│ AI Rejections                   │ {:>12} │", metrics.ai_rejections);
+    println!("│ Agent Approvals                   │ {:>12} │", metrics.agent_approvals);
+    println!("│ Agent Rejections                  │ {:>12} │", metrics.agent_rejections);
     println!("│ Manual Overrides                │ {:>12} │", metrics.manual_overrides);
     println!("│ Avg Processing Time (ms)        │ {:>12.2} │", metrics.avg_processing_time_ms);
     println!("│ Current Balance (BTC)           │ {:>12.8} │", metrics.current_balance as f64 / 100_000_000.0);
@@ -274,11 +274,11 @@ async fn handle_metrics(vault_manager: Arc<VaultManager>) -> Result<()> {
     println!("└─────────────────────────────────┴──────────────┘");
 
     // Calculate additional derived metrics
-    let total_decisions = metrics.ai_approvals + metrics.ai_rejections;
+    let total_decisions = metrics.agent_approvals + metrics.agent_rejections;
     if total_decisions > 0 {
-        let approval_rate = (metrics.ai_approvals as f64 / total_decisions as f64) * 100.0;
+        let approval_rate = (metrics.agent_approvals as f64 / total_decisions as f64) * 100.0;
         println!("\n📈 Derived Metrics");
-        println!("AI Approval Rate: {:.1}%", approval_rate);
+        println!("Agent Approval Rate: {:.1}%", approval_rate);
     }
 
     Ok(())
@@ -303,7 +303,7 @@ async fn handle_history(
     }
 
     println!("┌──────────────────┬─────────────────┬────────────────────────┬─────────────┐");
-    println!("│ Transaction ID   │ Amount (BTC)    │ Destination            │ AI Decision │");
+    println!("│ Transaction ID   │ Amount (BTC)    │ Destination            │ Agent Decision │");
     println!("├──────────────────┼─────────────────┼────────────────────────┼─────────────┤");
 
     for (i, tx) in state.pending_transactions.iter().take(limit).enumerate() {
@@ -318,10 +318,10 @@ async fn handle_history(
         } else {
             tx.destination.clone()
         };
-        let ai_decision = tx.ai_decision.as_deref().unwrap_or("N/A");
+        let agent_decision = tx.agent_decision.as_deref().unwrap_or("N/A");
 
         println!("│ {:16} │ {:15.8} │ {:22} │ {:11} │", 
-                 short_txid, amount_btc, short_dest, ai_decision);
+                 short_txid, amount_btc, short_dest, agent_decision);
     }
 
     println!("└──────────────────┴─────────────────┴────────────────────────┴─────────────┘");
@@ -341,13 +341,13 @@ async fn handle_benchmark(
     println!("Operations: {}", operations);
     println!("=================================");
 
-    // Benchmark AI decisions
-    println!("Benchmarking AI decisions...");
+    // Benchmark agent decisions
+    println!("Benchmarking agent decisions...");
     let start_time = std::time::Instant::now();
     
     for i in 0..operations {
         // Create mock transaction context for benchmarking
-        let context = tesaurus::ai::TransactionContext {
+        let context = tesaurus::agent::TransactionContext {
             amount: (i as u64 % 1000) * 10000, // Varying amounts
             destination: format!("tb1qbenchmark{:08x}", i),
             inactivity_duration: std::time::Duration::from_secs(3600 * (i as u64 % 48)),
@@ -356,7 +356,7 @@ async fn handle_benchmark(
             block_height: 800000 + (i as u32 % 1000),
         };
         
-        // This would normally call the AI engine, but we'll simulate for benchmarking
+        // This would normally call the agent engine, but we'll simulate for benchmarking
         tokio::time::sleep(std::time::Duration::from_micros(100)).await;
     }
     

@@ -3,7 +3,7 @@
 use crate::{
     config::Config, 
     crypto::CryptoManager, 
-    ai::{AIEngine, AIDecision, TransactionContext},
+    agent::{AgentEngine, AgentDecision, TransactionContext},
     storage::{StorageManager, VaultState, PendingTransaction},
     error::TesaurusError, 
     Result
@@ -22,8 +22,8 @@ pub struct VaultManager {
     config: Arc<Config>,
     /// Cryptographic operations
     crypto: Arc<CryptoManager>,
-    /// AI decision engine
-    ai_engine: Arc<AIEngine>,
+    /// agent decision engine
+    agent_engine: Arc<AgentEngine>,
     /// Storage backend
     storage: Arc<StorageManager>,
     /// Current vault state
@@ -55,8 +55,8 @@ enum TransactionPriority {
 #[derive(Debug, Default, Clone)]
 pub struct VaultMetrics {
     pub transactions_processed: u64,
-    pub ai_approvals: u64,
-    pub ai_rejections: u64,
+    pub agent_approvals: u64,
+    pub agent_rejections: u64,
     pub manual_overrides: u64,
     pub avg_processing_time_ms: f64,
     pub current_balance: u64,
@@ -67,7 +67,7 @@ pub struct VaultMetrics {
 struct KeyManager {
     primary_key: Option<PrivateKey>,
     override_key: Option<PrivateKey>,
-    ai_key: Option<PrivateKey>,
+    agent_key: Option<PrivateKey>,
     multisig_address: Option<Address>,
     public_keys: Vec<PublicKey>,
 }
@@ -77,7 +77,7 @@ impl KeyManager {
         Self {
             primary_key: None,
             override_key: None,
-            ai_key: None,
+            agent_key: None,
             multisig_address: None,
             public_keys: Vec::new(),
         }
@@ -90,7 +90,7 @@ pub struct TransactionParams {
     pub destination: Address,
     pub amount: u64,
     pub fee_rate: u64,
-    pub use_ai: bool,
+    pub use_agent: bool,
     pub priority: String,
 }
 
@@ -99,7 +99,7 @@ impl VaultManager {
     pub async fn new(
         config: Config,
         crypto: Arc<CryptoManager>,
-        ai_engine: Arc<AIEngine>,
+        agent_engine: Arc<AgentEngine>,
         storage: Arc<StorageManager>,
     ) -> Result<Self> {
         let config = Arc::new(config);
@@ -116,7 +116,7 @@ impl VaultManager {
         let manager = Self {
             config,
             crypto,
-            ai_engine,
+            agent_engine,
             storage,
             state: Arc::new(RwLock::new(vault_state)),
             tx_pool: DashMap::new(),
@@ -138,16 +138,16 @@ impl VaultManager {
         &self,
         primary_key: PrivateKey,
         override_key: PrivateKey,
-        ai_key: PrivateKey,
+        agent_key: PrivateKey,
     ) -> Result<Address> {
         let mut keys = self.keys.write().await;
         
         // Derive public keys
         let primary_pubkey = self.crypto.derive_public_key(&primary_key)?;
         let override_pubkey = self.crypto.derive_public_key(&override_key)?;
-        let ai_pubkey = self.crypto.derive_public_key(&ai_key)?;
+        let agent_pubkey = self.crypto.derive_public_key(&agent_key)?;
         
-        let public_keys = vec![primary_pubkey, override_pubkey, ai_pubkey];
+        let public_keys = vec![primary_pubkey, override_pubkey, agent_pubkey];
         
         // Create 2-of-3 multisig address
         let multisig_address = self.crypto.create_multisig_address(&public_keys, 2)?;
@@ -155,7 +155,7 @@ impl VaultManager {
         // Store keys and address
         keys.primary_key = Some(primary_key);
         keys.override_key = Some(override_key);
-        keys.ai_key = Some(ai_key);
+        keys.agent_key = Some(agent_key);
         keys.multisig_address = Some(multisig_address.clone());
         keys.public_keys = public_keys;
         
@@ -171,41 +171,41 @@ impl VaultManager {
         Ok(multisig_address)
     }
 
-    /// Create and submit a transaction with AI decision making
+    /// Create and submit a transaction with agent decision making
     pub async fn create_transaction(&self, params: TransactionParams) -> Result<String> {
         let start_time = Instant::now();
         
         // Validate parameters
         self.validate_transaction_params(&params).await?;
         
-        // Create transaction context for AI
+        // Create transaction context for agent
         let context = self.create_transaction_context(&params).await?;
         
-        // Get AI decision if requested
-        let ai_decision = if params.use_ai {
-            Some(self.ai_engine.make_decision(&context).await?)
+        // Get agent decision if requested
+        let agent_decision = if params.use_agent {
+            Some(self.agent_engine.make_decision(&context).await?)
         } else {
             None
         };
         
         // Check if transaction should proceed
-        match &ai_decision {
-            Some(AIDecision::Reject) => {
-                return Err(TesaurusError::Transaction("AI rejected transaction".to_string()));
+        match &agent_decision {
+            Some(AgentDecision::Reject) => {
+                return Err(TesaurusError::Transaction("agent rejected transaction".to_string()));
             }
-            Some(AIDecision::ReviewRequired) => {
+            Some(AgentDecision::ReviewRequired) => {
                 // Queue for manual review
                 return self.queue_for_review(params, context).await;
             }
-            _ => {} // Approve or no AI decision
+            _ => {} // Approve or no agent decision
         }
         
         // Create and sign transaction
-        let txid = self.execute_transaction(params, ai_decision).await?;
+        let txid = self.execute_transaction(params, agent_decision).await?;
         
         // Update metrics
         let processing_time = start_time.elapsed();
-        self.update_transaction_metrics(processing_time, &ai_decision);
+        self.update_transaction_metrics(processing_time, &agent_decision);
         
         Ok(txid)
     }
@@ -214,16 +214,16 @@ impl VaultManager {
     async fn execute_transaction(
         &self,
         params: TransactionParams,
-        ai_decision: Option<AIDecision>,
+        agent_decision: Option<AgentDecision>,
     ) -> Result<String> {
         let keys = self.keys.read().await;
         let state = self.state.read().await;
         
-        // Determine which keys to use based on inactivity and AI decision
+        // Determine which keys to use based on inactivity and agent decision
         let (signing_keys, key_description) = if state.inactivity_blocks >= self.config.bitcoin.inactivity_blocks {
-            // Post-inactivity: use primary + AI key
-            if let (Some(primary), Some(ai)) = (&keys.primary_key, &keys.ai_key) {
-                (vec![primary.clone(), ai.clone()], "primary+ai")
+            // Post-inactivity: use primary + agent key
+            if let (Some(primary), Some(agent_key)) = (&keys.primary_key, &keys.agent_key) {
+                (vec![primary.clone(), agent_key.clone()], "primary+agent")
             } else {
                 return Err(TesaurusError::Transaction("Required keys not available".to_string()));
             }
@@ -245,7 +245,7 @@ impl VaultManager {
             amount: params.amount,
             destination: params.destination.to_string(),
             created_at: Instant::now(),
-            ai_decision: ai_decision.map(|d| format!("{:?}", d)),
+            agent_decision: agent_decision.map(|d| format!("{:?}", d)),
         };
         
         self.storage.store_transaction(&pending_tx).await?;
@@ -292,7 +292,7 @@ impl VaultManager {
         Ok(review_id)
     }
 
-    /// Create transaction context for AI decision making
+    /// Create transaction context for agent decision making
     async fn create_transaction_context(&self, params: &TransactionParams) -> Result<TransactionContext> {
         let state = self.state.read().await;
         
@@ -309,8 +309,8 @@ impl VaultManager {
         })
     }
 
-    /// Get historical transaction patterns for AI analysis
-    async fn get_historical_patterns(&self) -> Result<Vec<crate::ai::TransactionPattern>> {
+    /// Get historical transaction patterns for agent analysis
+    async fn get_historical_patterns(&self) -> Result<Vec<crate::agent::TransactionPattern>> {
         // Query recent transactions from storage
         let recent_txs = self.storage.query_transactions(100, 0, Some("completed")).await?;
         
@@ -318,7 +318,7 @@ impl VaultManager {
         let mut patterns = Vec::new();
         
         for tx in recent_txs {
-            let pattern = crate::ai::TransactionPattern {
+            let pattern = crate::agent::TransactionPattern {
                 amount: tx.amount,
                 frequency: 1.0, // Simplified
                 time_of_day: 12, // Simplified
@@ -474,14 +474,14 @@ impl VaultManager {
     }
 
     /// Update transaction processing metrics
-    fn update_transaction_metrics(&self, duration: Duration, ai_decision: &Option<AIDecision>) {
+    fn update_transaction_metrics(&self, duration: Duration, agent_decision: &Option<AgentDecision>) {
         let mut metrics = self.metrics.lock();
         metrics.transactions_processed += 1;
         
-        match ai_decision {
-            Some(AIDecision::Approve) => metrics.ai_approvals += 1,
-            Some(AIDecision::Reject) => metrics.ai_rejections += 1,
-            Some(AIDecision::ReviewRequired) => {}, // Handled separately
+        match agent_decision {
+            Some(AgentDecision::Approve) => metrics.agent_approvals += 1,
+            Some(AgentDecision::Reject) => metrics.agent_rejections += 1,
+            Some(AgentDecision::ReviewRequired) => {}, // Handled separately
             None => metrics.manual_overrides += 1,
         }
         
@@ -507,7 +507,7 @@ impl Clone for VaultManager {
         Self {
             config: Arc::clone(&self.config),
             crypto: Arc::clone(&self.crypto),
-            ai_engine: Arc::clone(&self.ai_engine),
+            agent_engine: Arc::clone(&self.agent_engine),
             storage: Arc::clone(&self.storage),
             state: Arc::clone(&self.state),
             tx_pool: self.tx_pool.clone(),

@@ -8,8 +8,8 @@ rpc_password = "testpass"
 confirmations = 1
 inactivity_blocks = 10
 
-[ai]
-model_path = "/data/tesaurus/models/tesaurus_ai.pkl"
+[agent]
+model_path = "/data/tesaurus/models/tesaurus_agent.pkl"
 inference_timeout = "5s"
 batch_size = 32
 threads = 4

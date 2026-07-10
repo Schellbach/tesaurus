@@ -1,8 +1,8 @@
 #!/usr/bin/env python3
 """
-High-Performance AI Vault Module for Tesaurus Bitcoin Vault
+High-Performance Agent Vault Module for Tesaurus Bitcoin Vault
 
-This module implements an optimized AI engine for making Bitcoin transaction decisions
+This module implements an optimized agent engine for making Bitcoin transaction decisions
 with focus on performance, memory efficiency, and low latency inference.
 """
 
@@ -34,14 +34,14 @@ logging.basicConfig(
     format='%(asctime)s - %(name)s - %(levelname)s - %(message)s',
     handlers=[
         logging.StreamHandler(),
-        logging.FileHandler('ai_vault.log')
+        logging.FileHandler('agent_vault.log')
     ]
 )
 logger = logging.getLogger(__name__)
 
 @dataclass
 class TransactionContext:
-    """Transaction context for AI decision making"""
+    """Transaction context for agent decision making"""
     amount: float
     destination: str
     inactivity_duration_hours: float
@@ -52,15 +52,15 @@ class TransactionContext:
     historical_patterns: List[Dict[str, float]]
 
 @dataclass
-class AIDecision:
-    """AI decision with confidence score"""
+class AgentDecision:
+    """agent decision with confidence score"""
     decision: str  # 'approve', 'reject', 'review'
     confidence: float
     reasoning: str
     processing_time_ms: float
 
 class PerformanceMonitor:
-    """Monitor AI performance metrics"""
+    """Monitor agent performance metrics"""
     
     def __init__(self):
         self.decisions_made = 0
@@ -94,10 +94,10 @@ class PerformanceMonitor:
             'memory_usage_mb': psutil.Process().memory_info().rss / 1024 / 1024
         }
 
-class OptimizedAIEngine:
-    """High-performance AI engine for Bitcoin vault decisions"""
+class OptimizedAgentEngine:
+    """High-performance agent engine for Bitcoin vault decisions"""
     
-    def __init__(self, model_path: str = "./models/tesaurus_ai.pkl", 
+    def __init__(self, model_path: str = "./models/tesaurus_agent.pkl", 
                  redis_url: str = "redis://localhost:6379"):
         self.model_path = Path(model_path)
         self.redis_url = redis_url
@@ -135,8 +135,8 @@ class OptimizedAIEngine:
         }
     
     async def initialize(self):
-        """Initialize the AI engine with performance optimizations"""
-        logger.info("Initializing AI engine...")
+        """Initialize the agent engine with performance optimizations"""
+        logger.info("Initializing agent engine...")
         
         # Set up high-performance event loop
         if isinstance(asyncio.get_event_loop(), uvloop.Loop):
@@ -154,7 +154,7 @@ class OptimizedAIEngine:
         # Load or create model
         await self._load_or_create_model()
         
-        logger.info("AI engine initialized successfully")
+        logger.info("agent engine initialized successfully")
     
     async def _load_or_create_model(self):
         """Load existing model or create a new one with optimizations"""
@@ -185,7 +185,7 @@ class OptimizedAIEngine:
     
     async def _create_default_model(self):
         """Create a default model with reasonable parameters"""
-        logger.info("Creating default AI model...")
+        logger.info("Creating default agent model...")
         
         # Create default scaler
         self.scaler = StandardScaler()
@@ -275,8 +275,8 @@ class OptimizedAIEngine:
             self.thread_pool, joblib.dump, model_data, self.model_path
         )
     
-    async def make_decision(self, context: TransactionContext) -> AIDecision:
-        """Make AI decision with performance optimizations"""
+    async def make_decision(self, context: TransactionContext) -> AgentDecision:
+        """Make agent decision with performance optimizations"""
         start_time = time.time()
         
         # Create cache key
@@ -293,7 +293,7 @@ class OptimizedAIEngine:
             try:
                 cached_decision = await self.redis_client.get(f"decision:{cache_key}")
                 if cached_decision:
-                    decision = AIDecision(**json.loads(cached_decision))
+                    decision = AgentDecision(**json.loads(cached_decision))
                     self.decision_cache[cache_key] = decision
                     self.monitor.record_decision(time.time() - start_time, cache_hit=True)
                     return decision
@@ -329,8 +329,8 @@ class OptimizedAIEngine:
         key_data = f"{context.amount}:{context.destination}:{context.inactivity_duration_hours}:{context.fee_rate}:{context.block_height}"
         return hashlib.sha256(key_data.encode()).hexdigest()[:16]
     
-    async def _perform_inference(self, context: TransactionContext) -> AIDecision:
-        """Perform AI inference with optimized feature extraction"""
+    async def _perform_inference(self, context: TransactionContext) -> AgentDecision:
+        """Perform agent inference with optimized feature extraction"""
         # Extract features efficiently
         features = await self._extract_features(context)
         
@@ -345,7 +345,7 @@ class OptimizedAIEngine:
             anomaly_score, risk_factors, context
         )
         
-        return AIDecision(
+        return AgentDecision(
             decision=decision,
             confidence=confidence,
             reasoning=reasoning,
@@ -515,7 +515,7 @@ class OptimizedAIEngine:
     async def batch_decisions(
         self, 
         contexts: List[TransactionContext]
-    ) -> List[AIDecision]:
+    ) -> List[AgentDecision]:
         """Process multiple decisions in parallel for better performance"""
         tasks = [self.make_decision(context) for context in contexts]
         return await asyncio.gather(*tasks)
@@ -574,17 +574,17 @@ class OptimizedAIEngine:
             await self.redis_client.close()
         
         self.thread_pool.shutdown(wait=True)
-        logger.info("AI engine cleanup completed")
+        logger.info("agent engine cleanup completed")
 
 # Example usage and testing
 async def main():
-    """Main function for testing the AI engine"""
+    """Main function for testing the agent engine"""
     # Set up high-performance event loop
     asyncio.set_event_loop_policy(uvloop.EventLoopPolicy())
     
-    # Initialize AI engine
-    ai_engine = OptimizedAIEngine()
-    await ai_engine.initialize()
+    # Initialize agent engine
+    agent_engine = OptimizedAgentEngine()
+    await agent_engine.initialize()
     
     # Test with sample transaction
     test_context = TransactionContext(
@@ -602,18 +602,18 @@ async def main():
     )
     
     # Make decision
-    decision = await ai_engine.make_decision(test_context)
+    decision = await agent_engine.make_decision(test_context)
     print(f"Decision: {decision.decision}")
     print(f"Confidence: {decision.confidence:.2f}")
     print(f"Reasoning: {decision.reasoning}")
     print(f"Processing time: {decision.processing_time_ms:.2f}ms")
     
     # Performance stats
-    stats = ai_engine.get_performance_stats()
+    stats = agent_engine.get_performance_stats()
     print(f"Performance stats: {stats}")
     
     # Cleanup
-    await ai_engine.cleanup()
+    await agent_engine.cleanup()
 
 if __name__ == "__main__":
     asyncio.run(main())

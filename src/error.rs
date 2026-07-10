@@ -28,8 +28,8 @@ pub enum TesaurusError {
     #[error("JSON error: {0}")]
     Json(#[from] serde_json::Error),
     
-    #[error("AI engine error: {0}")]
-    AI(String),
+    #[error("Agent engine error: {0}")]
+    Agent(String),
     
     #[error("Vault state error: {0}")]
     VaultState(String),
@@ -53,9 +53,9 @@ impl TesaurusError {
         Self::Crypto(msg.to_string())
     }
     
-    /// Create an AI error without heap allocation when possible
-    pub fn ai(msg: &'static str) -> Self {
-        Self::AI(msg.to_string())
+    /// Create an agent error without heap allocation when possible
+    pub fn agent(msg: &'static str) -> Self {
+        Self::Agent(msg.to_string())
     }
     
     /// Create a vault state error without heap allocation when possible

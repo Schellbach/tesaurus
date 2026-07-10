@@ -9,7 +9,7 @@ Tesaurus has been optimized for:
 - **Fast startup times** with lazy loading and efficient initialization
 - **Low latency operations** using async/await patterns and caching
 - **Memory efficiency** with optimized data structures and memory management
-- **High throughput** for transaction processing and AI decision making
+- **High throughput** for transaction processing and agent decision making
 
 ## 📊 Key Performance Metrics
 
@@ -19,7 +19,7 @@ Tesaurus has been optimized for:
 | Startup Time | < 2s | Lazy loading, optimized dependencies |
 | Transaction Processing | < 100ms | Async operations, caching |
 | Memory Usage | < 256MB | Efficient data structures, memory pools |
-| AI Decision Time | < 50ms | Model caching, batch processing |
+| Agent Decision Time | < 50ms | Model caching, batch processing |
 
 ## 🔧 Rust Backend Optimizations
 
@@ -46,7 +46,7 @@ strip = true          # Remove debug symbols
 - **LRU Cache**: Memory-efficient caching with TTL
 - **Binary serialization**: Faster than JSON for internal data
 
-## 🐍 Python AI Module Optimizations
+## 🐍 Python Agent Module Optimizations
 
 ### Performance Libraries
 - **uvloop**: High-performance async event loop (2-4x faster)
@@ -54,9 +54,9 @@ strip = true          # Remove debug symbols
 - **cachetools**: Efficient caching with TTL and LRU policies
 - **psutil**: Lightweight system monitoring
 
-### AI Engine Optimizations
+### Agent Engine Optimizations
 - **Model caching**: Avoid repeated model loading
-- **Decision caching**: Cache AI decisions with TTL
+- **Decision caching**: Cache agent decisions with TTL
 - **Batch processing**: Process multiple decisions in parallel
 - **Thread pooling**: CPU-intensive operations in thread pool
 - **Feature caching**: Cache extracted features to avoid recomputation
@@ -109,7 +109,7 @@ strip = true          # Remove debug symbols
 ### Performance Metrics
 - **System metrics**: CPU, memory, disk usage
 - **Application metrics**: Transaction throughput, error rates
-- **Custom metrics**: AI decision times, cache hit rates
+- **Custom metrics**: agent decision times, cache hit rates
 - **Histograms**: Latency distribution analysis
 
 ### Prometheus Integration
@@ -220,7 +220,7 @@ heaptrack ./target/release/tesaurus-daemon
 
 | Component | Metric | Target | Current |
 |-----------|--------|--------|---------|
-| AI Engine | Decision time | < 50ms | ~30ms |
+| Agent Engine | Decision time | < 50ms | ~30ms |
 | Storage | Read latency | < 10ms | ~5ms |
 | Storage | Write latency | < 20ms | ~15ms |
 | Network | RPC latency | < 100ms | ~75ms |
@@ -232,7 +232,7 @@ heaptrack ./target/release/tesaurus-daemon
 ### Planned Improvements
 - **Profile-guided optimization (PGO)** for hot paths
 - **SIMD optimizations** for cryptographic operations  
-- **GPU acceleration** for AI inference (optional)
+- **GPU acceleration** for agent inference (optional)
 - **Custom memory allocator** (jemalloc/mimalloc)
 - **Zero-copy deserialization** for network protocols
 

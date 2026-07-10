@@ -1,12 +1,12 @@
 //! Tesaurus - Performance-Optimized Bitcoin Vault
 //! 
-//! A high-performance Bitcoin vault implementation with AI recovery capabilities.
+//! A high-performance Bitcoin vault implementation with agent recovery capabilities.
 //! Optimized for minimal latency, efficient memory usage, and fast transaction processing.
 
 pub mod config;
 pub mod crypto;
 pub mod vault;
-pub mod ai;
+pub mod agent;
 pub mod storage;
 pub mod network;
 pub mod metrics;
@@ -33,8 +33,8 @@ pub struct TesaurusVault {
     config: Arc<config::Config>,
     /// Crypto operations handler with hardware acceleration when available
     crypto: Arc<crypto::CryptoManager>,
-    /// AI decision engine with optimized inference
-    ai_engine: Arc<ai::AIEngine>,
+    /// agent decision engine with optimized inference
+    agent_engine: Arc<agent::AgentEngine>,
     /// High-performance storage backend
     storage: Arc<storage::StorageManager>,
     /// Network manager with connection pooling
@@ -52,7 +52,7 @@ impl TesaurusVault {
         
         // Initialize components with performance focus
         let crypto = Arc::new(crypto::CryptoManager::new(&config).await?);
-        let ai_engine = Arc::new(ai::AIEngine::new(&config).await?);
+        let agent_engine = Arc::new(agent::AgentEngine::new(&config).await?);
         let storage = Arc::new(storage::StorageManager::new(&config).await?);
         let network = Arc::new(network::NetworkManager::new(&config).await?);
         let metrics = Arc::new(metrics::MetricsCollector::new());
@@ -61,7 +61,7 @@ impl TesaurusVault {
         Ok(Self {
             config,
             crypto,
-            ai_engine,
+            agent_engine,
             storage,
             network,
             metrics,

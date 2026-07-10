@@ -2,14 +2,14 @@
 
 ## 🎯 Project Overview
 
-The Tesaurus Bitcoin Vault has been comprehensively analyzed and optimized for **performance, bundle size, and load times**. This project implements a high-performance Bitcoin vault with AI recovery capabilities, built with Rust backend and Python AI components.
+The Tesaurus Bitcoin Vault has been comprehensively analyzed and optimized for **performance, bundle size, and load times**. This project implements a high-performance Bitcoin vault with agent recovery capabilities, built with Rust backend and Python agent components.
 
 ## ✅ Completed Optimizations
 
 ### 1. **Project Structure Analysis** ✅
 - **Identified**: Bitcoin vault project built on Liana framework
-- **Technology Stack**: Rust (backend) + Python (AI) + Bitcoin Core
-- **Architecture**: 2-of-3 multisig with AI co-signing after inactivity
+- **Technology Stack**: Rust (backend) + Python (agent) + Bitcoin Core
+- **Architecture**: 2-of-3 multisig with agent co-signing after inactivity
 
 ### 2. **Build Configuration Optimization** ✅
 - **Cargo.toml**: Maximum optimization settings
@@ -42,7 +42,7 @@ The Tesaurus Bitcoin Vault has been comprehensively analyzed and optimized for *
 - **Batch operations**: Group multiple operations for efficiency
 - **Background tasks**: Separate async tasks for maintenance
 
-### 6. **AI Engine Optimization** ✅
+### 6. **Agent Engine Optimization** ✅
 - **Model caching**: Avoid repeated model loading
 - **Decision caching**: TTL-based caching with Redis fallback
 - **Thread pool**: CPU-intensive operations in separate threads
@@ -89,7 +89,7 @@ L1 Cache (Memory) -> L2 Cache (Redis) -> L3 Storage (Database)
 ### Runtime Performance
 | Component | Target | Achieved | Improvement |
 |-----------|--------|----------|-------------|
-| AI Decision | < 50ms | ~30ms | 40% faster |
+| Agent Decision | < 50ms | ~30ms | 40% faster |
 | Storage Read | < 10ms | ~5ms | 50% faster |
 | Storage Write | < 20ms | ~15ms | 25% faster |
 | Network RPC | < 100ms | ~75ms | 25% faster |
@@ -120,7 +120,7 @@ L1 Cache (Memory) -> L2 Cache (Redis) -> L3 Storage (Database)
 
 ### 4. **Benchmarking Suite** (`benches/performance.rs`)
 - Crypto operations benchmarking
-- AI decision performance testing
+- agent decision performance testing
 - Storage operation benchmarks
 - End-to-end transaction flow testing
 - Concurrent operation testing
@@ -143,7 +143,7 @@ L1 Cache (Memory) -> L2 Cache (Redis) -> L3 Storage (Database)
 
 ### Metrics Collection
 - **Prometheus integration**: System and application metrics
-- **Custom metrics**: Transaction throughput, AI decision times
+- **Custom metrics**: Transaction throughput, agent decision times
 - **Performance dashboards**: Grafana visualization
 - **Alerting**: Performance regression detection
 
@@ -162,7 +162,7 @@ L1 Cache (Memory) -> L2 Cache (Redis) -> L3 Storage (Database)
 - **Profile-guided optimization** setup
 - **Async-first design** throughout
 
-### Python AI Module
+### Python Agent Module
 - **Vectorized operations** with NumPy
 - **Model quantization** for smaller memory footprint
 - **Batch inference** for higher throughput
@@ -184,7 +184,7 @@ L1 Cache (Memory) -> L2 Cache (Redis) -> L3 Storage (Database)
 | Startup Time | < 2s | ✅ ~1.5s | Lazy loading implemented |
 | Transaction Latency | < 100ms | ✅ ~75ms | Caching and async ops |
 | Memory Usage | < 256MB | ✅ ~180MB | Efficient data structures |
-| AI Decision Time | < 50ms | ✅ ~30ms | Model and decision caching |
+| Agent Decision Time | < 50ms | ✅ ~30ms | Model and decision caching |
 | Cache Hit Rate | > 80% | ✅ ~85% | Multi-level caching |
 | Throughput | > 100 tx/s | ✅ ~150 tx/s | Batch processing |
 
@@ -198,7 +198,7 @@ L1 Cache (Memory) -> L2 Cache (Redis) -> L3 Storage (Database)
 - **WASM compilation** for browser compatibility
 
 ### Experimental Features
-- **GPU acceleration** for AI inference (optional)
+- **GPU acceleration** for agent inference (optional)
 - **Persistent memory** support (Intel Optane)
 - **RDMA networking** for ultra-low latency
 - **Custom Bitcoin protocol optimizations**

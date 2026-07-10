@@ -73,6 +73,6 @@ CMD ["tesaurus-daemon", "--config", "/etc/tesaurus/tesaurus.toml"]
 
 # Build-time metadata
 LABEL org.opencontainers.image.title="Tesaurus Bitcoin Vault"
-LABEL org.opencontainers.image.description="High-performance Bitcoin vault with AI recovery"
+LABEL org.opencontainers.image.description="High-performance Bitcoin vault with agent recovery"
 LABEL org.opencontainers.image.version="0.1.0"
 LABEL org.opencontainers.image.vendor="Tesaurus Team"

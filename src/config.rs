@@ -8,8 +8,8 @@ use std::time::Duration;
 pub struct Config {
     /// Bitcoin network configuration
     pub bitcoin: BitcoinConfig,
-    /// AI engine configuration
-    pub ai: AIConfig,
+    /// agent engine configuration
+    pub agent: AgentConfig,
     /// Storage configuration
     pub storage: StorageConfig,
     /// Network configuration
@@ -37,14 +37,14 @@ pub struct BitcoinConfig {
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct AIConfig {
-    /// AI model path
+pub struct AgentConfig {
+    /// agent model path
     pub model_path: PathBuf,
     /// Inference timeout
     pub inference_timeout: Duration,
     /// Batch size for inference
     pub batch_size: usize,
-    /// Number of threads for AI processing
+    /// Number of threads for agent processing
     pub threads: usize,
     /// Enable GPU acceleration if available
     pub use_gpu: bool,
@@ -111,8 +111,8 @@ impl Default for Config {
                 confirmations: 1,
                 inactivity_blocks: 10,
             },
-            ai: AIConfig {
-                model_path: PathBuf::from("./models/tesaurus_ai.bin"),
+            agent: AgentConfig {
+                model_path: PathBuf::from("./models/tesaurus_agent.bin"),
                 inference_timeout: Duration::from_secs(5),
                 batch_size: 32,
                 threads: num_cpus::get(),
@@ -168,8 +168,8 @@ impl Config {
             return Err("Cache size must be greater than 0".to_string());
         }
         
-        if self.ai.batch_size == 0 {
-            return Err("AI batch size must be greater than 0".to_string());
+        if self.agent.batch_size == 0 {
+            return Err("agent batch size must be greater than 0".to_string());
         }
         
         Ok(())

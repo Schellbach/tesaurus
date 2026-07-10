@@ -1,4 +1,4 @@
-//! AI Engine with performance optimizations for Bitcoin vault decisions
+//! Agent Engine with performance optimizations for Bitcoin vault decisions
 
 use crate::{config::Config, error::TesaurusError, Result};
 use std::sync::Arc;
@@ -8,9 +8,9 @@ use dashmap::DashMap;
 use serde::{Deserialize, Serialize};
 use std::time::{Duration, Instant};
 
-/// AI decision types
+/// agent decision types
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
-pub enum AIDecision {
+pub enum AgentDecision {
     /// Approve the transaction
     Approve,
     /// Reject the transaction
@@ -19,7 +19,7 @@ pub enum AIDecision {
     ReviewRequired,
 }
 
-/// Transaction context for AI decision making
+/// Transaction context for agent decision making
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct TransactionContext {
     /// Transaction amount in satoshis
@@ -44,18 +44,18 @@ pub struct TransactionPattern {
     pub day_of_week: u8,
 }
 
-/// High-performance AI engine for vault decisions
-pub struct AIEngine {
-    /// AI model configuration
+/// High-performance agent engine for vault decisions
+pub struct AgentEngine {
+    /// agent model configuration
     config: Arc<Config>,
     /// Decision cache to avoid repeated computations
-    decision_cache: DashMap<String, (AIDecision, Instant)>,
+    decision_cache: DashMap<String, (AgentDecision, Instant)>,
     /// Inference semaphore to limit concurrent operations
     inference_semaphore: Arc<Semaphore>,
     /// Model state (simplified - in practice would load actual ML model)
     model_state: Arc<RwLock<ModelState>>,
     /// Performance metrics
-    metrics: Arc<Mutex<AIMetrics>>,
+    metrics: Arc<Mutex<AgentMetrics>>,
 }
 
 #[derive(Debug, Default)]
@@ -69,7 +69,7 @@ struct ModelState {
 }
 
 #[derive(Debug, Default, Clone)]
-pub struct AIMetrics {
+pub struct AgentMetrics {
     pub total_decisions: u64,
     pub cache_hits: u64,
     pub cache_misses: u64,
@@ -79,10 +79,10 @@ pub struct AIMetrics {
     pub reviews_required: u64,
 }
 
-impl AIEngine {
-    /// Create a new AI engine with performance optimizations
+impl AgentEngine {
+    /// Create a new agent engine with performance optimizations
     pub async fn new(config: &Config) -> Result<Self> {
-        let inference_semaphore = Arc::new(Semaphore::new(config.ai.threads));
+        let inference_semaphore = Arc::new(Semaphore::new(config.agent.threads));
         let model_state = Arc::new(RwLock::new(ModelState::default()));
         
         let engine = Self {
@@ -90,7 +90,7 @@ impl AIEngine {
             decision_cache: DashMap::new(),
             inference_semaphore,
             model_state,
-            metrics: Arc::new(Mutex::new(AIMetrics::default())),
+            metrics: Arc::new(Mutex::new(AgentMetrics::default())),
         };
 
         // Load model if available
@@ -99,9 +99,9 @@ impl AIEngine {
         Ok(engine)
     }
 
-    /// Load AI model from disk with performance optimizations
+    /// Load agent model from disk with performance optimizations
     async fn load_model(&self) -> Result<()> {
-        let model_path = &self.config.ai.model_path;
+        let model_path = &self.config.agent.model_path;
         
         if !model_path.exists() {
             // Initialize with default parameters if model doesn't exist
@@ -137,8 +137,8 @@ impl AIEngine {
         Ok(())
     }
 
-    /// Make AI decision with caching and performance optimizations
-    pub async fn make_decision(&self, context: &TransactionContext) -> Result<AIDecision> {
+    /// Make agent decision with caching and performance optimizations
+    pub async fn make_decision(&self, context: &TransactionContext) -> Result<AgentDecision> {
         let start_time = Instant::now();
         
         // Create cache key from context
@@ -155,7 +155,7 @@ impl AIEngine {
 
         // Acquire inference semaphore to limit concurrent operations
         let _permit = self.inference_semaphore.acquire().await
-            .map_err(|_| TesaurusError::ai("Failed to acquire inference permit"))?;
+            .map_err(|_| TesaurusError::agent("Failed to acquire inference permit"))?;
 
         // Perform inference
         let decision = self.perform_inference(context).await?;
@@ -170,8 +170,8 @@ impl AIEngine {
         Ok(decision)
     }
 
-    /// Perform actual AI inference (optimized implementation)
-    async fn perform_inference(&self, context: &TransactionContext) -> Result<AIDecision> {
+    /// Perform actual agent inference (optimized implementation)
+    async fn perform_inference(&self, context: &TransactionContext) -> Result<AgentDecision> {
         let state = self.model_state.read().await;
         
         // Simplified decision logic - in practice would use actual ML inference
@@ -206,11 +206,11 @@ impl AIEngine {
         
         // Make decision based on score
         let decision = if score > 0.5 {
-            AIDecision::Approve
+            AgentDecision::Approve
         } else if score > 0.0 {
-            AIDecision::ReviewRequired
+            AgentDecision::ReviewRequired
         } else {
-            AIDecision::Reject
+            AgentDecision::Reject
         };
         
         Ok(decision)
@@ -283,7 +283,7 @@ impl AIEngine {
     }
 
     /// Update metrics for inference
-    fn update_metrics_inference(&self, decision: AIDecision, duration: Duration) {
+    fn update_metrics_inference(&self, decision: AgentDecision, duration: Duration) {
         let mut metrics = self.metrics.lock();
         metrics.total_decisions += 1;
         metrics.cache_misses += 1;
@@ -296,14 +296,14 @@ impl AIEngine {
         
         // Update decision counters
         match decision {
-            AIDecision::Approve => metrics.approvals += 1,
-            AIDecision::Reject => metrics.rejections += 1,
-            AIDecision::ReviewRequired => metrics.reviews_required += 1,
+            AgentDecision::Approve => metrics.approvals += 1,
+            AgentDecision::Reject => metrics.rejections += 1,
+            AgentDecision::ReviewRequired => metrics.reviews_required += 1,
         }
     }
 
-    /// Get AI engine metrics
-    pub fn get_metrics(&self) -> AIMetrics {
+    /// Get agent engine metrics
+    pub fn get_metrics(&self) -> AgentMetrics {
         self.metrics.lock().clone()
     }
 
@@ -313,11 +313,11 @@ impl AIEngine {
     }
 
     /// Batch process multiple decisions for better performance
-    pub async fn batch_decisions(&self, contexts: &[TransactionContext]) -> Result<Vec<AIDecision>> {
+    pub async fn batch_decisions(&self, contexts: &[TransactionContext]) -> Result<Vec<AgentDecision>> {
         let mut decisions = Vec::with_capacity(contexts.len());
         
         // Process in parallel batches
-        let batch_size = self.config.ai.batch_size;
+        let batch_size = self.config.agent.batch_size;
         for chunk in contexts.chunks(batch_size) {
             let mut batch_futures = Vec::new();
             

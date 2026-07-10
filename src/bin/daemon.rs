@@ -3,7 +3,7 @@
 use tesaurus::{
     Config, TesaurusVault, Result,
     crypto::CryptoManager,
-    ai::AIEngine,
+    agent::AgentEngine,
     storage::StorageManager,
     network::NetworkManager,
     metrics::MetricsCollector,
@@ -66,7 +66,7 @@ async fn main() -> Result<()> {
 
     // Initialize components with performance optimizations
     let crypto_manager = Arc::new(CryptoManager::new(&config).await?);
-    let ai_engine = Arc::new(AIEngine::new(&config).await?);
+    let agent_engine = Arc::new(AgentEngine::new(&config).await?);
     let storage_manager = Arc::new(StorageManager::new(&config).await?);
     let network_manager = Arc::new(NetworkManager::new(&config).await?);
     let metrics_collector = Arc::new(MetricsCollector::new());

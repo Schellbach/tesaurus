@@ -41,7 +41,7 @@ pub struct SystemMetrics {
 #[derive(Debug, Default, Clone, Serialize, Deserialize)]
 pub struct AppMetrics {
     pub transactions_processed: u64,
-    pub ai_decisions_made: u64,
+    pub agent_decisions_made: u64,
     pub cache_hit_ratio: f64,
     pub avg_transaction_time_ms: f64,
     pub error_count: u64,
@@ -262,13 +262,13 @@ impl MetricsCollector {
             / metrics.transactions_processed as f64;
     }
 
-    /// Record AI decision time
-    pub fn record_ai_decision_time(&self, duration: Duration) {
+    /// Record agent decision time
+    pub fn record_agent_decision_time(&self, duration: Duration) {
         let ms = duration.as_millis() as f64;
-        self.record_histogram("ai_decision_duration_ms", ms);
+        self.record_histogram("agent_decision_duration_ms", ms);
         
         let mut metrics = self.app_metrics.lock();
-        metrics.ai_decisions_made += 1;
+        metrics.agent_decisions_made += 1;
     }
 
     /// Update cache hit ratio
