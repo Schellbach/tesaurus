@@ -1,41 +1,28 @@
-# Tesaurus Configuration File - Optimized for Performance
+# Tesaurus configuration (testnet defaults)
 
 [bitcoin]
 network = "testnet"
-rpc_url = "http://bitcoin:18332"
-rpc_user = "testuser"
-rpc_password = "testpass"
-confirmations = 1
-inactivity_blocks = 10
+rpc_url = "http://127.0.0.1:18332"
+rpc_user = "tesaurus"
+rpc_password = "changeme"
+wallet_name = "tesaurus"
+# cookie_path = "/home/bitcoin/.bitcoin/testnet3/.cookie"
 
-[ai]
-model_path = "/data/tesaurus/models/tesaurus_ai.pkl"
-inference_timeout = "5s"
-batch_size = 32
-threads = 4
-use_gpu = false
+[vault]
+state_path = "./data/vault.json"
+keys_dir = "./keys"
+# Relative timelock (CSV) before the agent recovery path is available.
+# 10 blocks ≈ 100 minutes on mainnet; use larger values in production.
+csv_blocks = 10
 
-[storage]
-db_path = "/data/tesaurus/vault.db"
-cache_size_mb = 256
-compression = true
-backup_interval = 3600
+[agent]
+bind = "127.0.0.1:18480"
+key_path = "./keys/agent.wif"
+# api_token = "replace-with-long-random-token"
+max_amount_sats = 50000000
+allowlist = []
+require_timelock = true
 
-[network]
-timeout = "30s"
-pool_size = 10
-keep_alive = "90s"
-http2 = true
-
-[performance]
-worker_threads = 4
-enable_metrics = true
-metrics_port = 9090
-memory_cache_mb = 128
-enable_simd = true
-
-[logging]
-level = "info"
-file_path = "/logs/tesaurus.log"
-structured = true
-performance = true
+[daemon]
+poll_interval_secs = 30
+agent_url = "http://127.0.0.1:18480"

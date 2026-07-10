@@ -1,0 +1,9 @@
+/target
+/data
+/keys
+*.wif
+*.log
+.idea
+.vscode
+.env
+Cargo.lock.bak

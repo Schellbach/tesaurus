@@ -1,0 +1,25 @@
+# Tesaurus configuration for Bitcoin Core regtest
+
+[bitcoin]
+network = "regtest"
+rpc_url = "http://127.0.0.1:18443"
+rpc_user = "tesaurus"
+rpc_password = "changeme"
+wallet_name = "tesaurus"
+
+[vault]
+state_path = "./data/vault.json"
+keys_dir = "./keys"
+csv_blocks = 10
+
+[agent]
+bind = "127.0.0.1:18480"
+key_path = "./keys/agent.wif"
+api_token = "regtest-dev-token"
+max_amount_sats = 2100000000000000
+allowlist = []
+require_timelock = true
+
+[daemon]
+poll_interval_secs = 5
+agent_url = "http://127.0.0.1:18480"
