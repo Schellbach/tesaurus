@@ -1,5 +1,8 @@
 # Tesaurus
 
+> [!WARNING]
+> **This project is experimental.** It is not production-ready, has not been audited, and may contain serious bugs. Do not put meaningful funds at risk. Prefer **regtest/testnet**, and read [SECURITY.md](SECURITY.md) before any real-world use.
+
 Sovereign Bitcoin vault with a **local agent** as the recovery co-signer.
 
 Tesaurus is a decaying 2-of-3 vault. Spending conditions are enforced on-chain with [Miniscript](https://bitcoin.sipa.be/miniscript/) — not by trusting the agent process.
@@ -18,6 +21,8 @@ You hold primary and override. The agent is software you run locally: it holds t
 Inspired by [Liana](https://github.com/wizardsardine/liana) and AnchorWatch-style recovery keyholders — with the third key kept under your control as a local agent instead of a remote custodian.
 
 ## Status
+
+**Experimental** — APIs, config, and security properties may change without notice.
 
 Working implementation:
 
