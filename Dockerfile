@@ -1,9 +1,9 @@
-# Multi-stage production image for Tesaurus binaries.
+# Multi-stage research image for the local Tesaurus CLI.
 FROM rust:1.85-bookworm AS builder
 WORKDIR /app
 COPY Cargo.toml Cargo.lock ./
 COPY src ./src
-RUN cargo build --release --locked
+RUN cargo build --release --locked --bin tesaurus
 
 FROM debian:bookworm-slim
 RUN apt-get update \
@@ -11,10 +11,7 @@ RUN apt-get update \
     && rm -rf /var/lib/apt/lists/* \
     && useradd -m -u 1000 tesaurus
 COPY --from=builder /app/target/release/tesaurus /usr/local/bin/tesaurus
-COPY --from=builder /app/target/release/tesaurus-agent /usr/local/bin/tesaurus-agent
-COPY config/tesaurus.toml /etc/tesaurus/tesaurus.toml
 USER tesaurus
 WORKDIR /home/tesaurus
-EXPOSE 18480
 ENTRYPOINT ["tesaurus"]
 CMD ["--help"]

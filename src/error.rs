@@ -21,9 +21,6 @@ pub enum Error {
     #[error("spend error: {0}")]
     Spend(String),
 
-    #[error("agent policy rejected: {0}")]
-    AgentPolicy(String),
-
     #[error("Bitcoin RPC error: {0}")]
     Rpc(#[from] bitcoincore_rpc::Error),
 
@@ -35,12 +32,6 @@ pub enum Error {
 
     #[error("JSON error: {0}")]
     Json(#[from] serde_json::Error),
-
-    #[error("HTTP error: {0}")]
-    Http(String),
-
-    #[error("{0}")]
-    Other(String),
 }
 
 impl Error {
@@ -62,9 +53,5 @@ impl Error {
 
     pub fn spend(msg: impl Into<String>) -> Self {
         Self::Spend(msg.into())
-    }
-
-    pub fn agent_policy(msg: impl Into<String>) -> Self {
-        Self::AgentPolicy(msg.into())
     }
 }

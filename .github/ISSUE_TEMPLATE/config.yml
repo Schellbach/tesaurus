@@ -1,0 +1,5 @@
+blank_issues_enabled: false
+contact_links:
+  - name: Private security report
+    url: https://github.com/Schellbach/tesaurus/security/advisories/new
+    about: Never disclose suspected vulnerabilities or real wallet data publicly.

@@ -1,29 +1,33 @@
-//! Tesaurus agent co-signer daemon.
+//! Disabled network co-signer placeholder.
 
-use anyhow::{Context, Result};
+use anyhow::{bail, Result};
 use clap::Parser;
-use std::path::PathBuf;
-use tesaurus::agent::run_agent_server;
-use tesaurus::config::Config;
 
 #[derive(Parser, Debug)]
-#[command(name = "tesaurus-agent", version, about = "Local agent recovery co-signer")]
-struct Cli {
-    #[arg(short, long, default_value = "config/tesaurus.toml")]
-    config: PathBuf,
+#[command(
+    name = "tesaurus-agent",
+    version,
+    about = "Disabled pending a reviewed PSBT-only co-signing protocol"
+)]
+struct Cli {}
+
+fn main() -> Result<()> {
+    let _ = Cli::parse();
+    bail!("{}", disabled_message())
 }
 
-#[tokio::main]
-async fn main() -> Result<()> {
-    tracing_subscriber::fmt()
-        .with_env_filter(
-            tracing_subscriber::EnvFilter::try_from_default_env()
-                .unwrap_or_else(|_| tracing_subscriber::EnvFilter::new("info")),
-        )
-        .init();
+fn disabled_message() -> &'static str {
+    "tesaurus-agent is disabled: the legacy HTTP protocol could expose primary key material; \
+     use only local regtest/testnet signing until a reviewed PSBT-only protocol ships"
+}
 
-    let cli = Cli::parse();
-    let cfg = Config::load(&cli.config).context("load config")?;
-    run_agent_server(cfg).await?;
-    Ok(())
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn explains_fail_closed_state() {
+        assert!(disabled_message().contains("disabled"));
+        assert!(disabled_message().contains("PSBT-only"));
+    }
 }

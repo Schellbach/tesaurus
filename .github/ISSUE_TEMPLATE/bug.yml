@@ -1,0 +1,47 @@
+name: Regtest or testnet bug
+description: Report a reproducible non-security defect using synthetic data.
+title: "bug: "
+labels:
+  - bug
+body:
+  - type: markdown
+    attributes:
+      value: |
+        Do not submit vulnerabilities, private keys, cookies, tokens, or real
+        transaction data here. Use the private security-reporting link instead.
+  - type: input
+    id: commit
+    attributes:
+      label: Commit
+      description: Full commit SHA where the behavior occurs.
+    validations:
+      required: true
+  - type: dropdown
+    id: network
+    attributes:
+      label: Research network
+      options:
+        - regtest
+        - testnet
+        - signet
+    validations:
+      required: true
+  - type: textarea
+    id: reproduce
+    attributes:
+      label: Minimal reproducer
+      description: Use synthetic keys and redact local paths or credentials.
+    validations:
+      required: true
+  - type: textarea
+    id: expected
+    attributes:
+      label: Expected behavior
+    validations:
+      required: true
+  - type: textarea
+    id: actual
+    attributes:
+      label: Actual behavior
+    validations:
+      required: true

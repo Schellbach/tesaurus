@@ -19,19 +19,22 @@ export PATH="$BITCOIN_BIN:$PATH"
 DATADIR="${DATADIR:-/tmp/tesaurus-regtest-datadir}"
 WORK="${WORK:-/tmp/tesaurus-regtest-work}"
 TES="$ROOT/target/release/tesaurus"
-AGENT="$ROOT/target/release/tesaurus-agent"
 
 cargo build --release --manifest-path "$ROOT/Cargo.toml"
 
-rm -rf "$DATADIR" "$WORK"
+if [[ "$DATADIR" != /tmp/tesaurus-* || "$WORK" != /tmp/tesaurus-* ]]; then
+  echo "refusing to delete non-Tesaurus paths: DATADIR=$DATADIR WORK=$WORK" >&2
+  exit 1
+fi
+rm -rf -- "$DATADIR" "$WORK"
 mkdir -p "$DATADIR" "$WORK"
 cp "$ROOT/config/tesaurus.regtest.toml" "$WORK/tesaurus.toml"
+chmod 600 "$WORK/tesaurus.toml"
 
 bitcoind -regtest -datadir="$DATADIR" -server -txindex -fallbackfee=0.0002 \
   -rpcuser=tesaurus -rpcpassword=changeme -rpcport=18443 -daemon
 cleanup() {
   bitcoin-cli -regtest -datadir="$DATADIR" -rpcuser=tesaurus -rpcpassword=changeme stop >/dev/null 2>&1 || true
-  pkill -f "$AGENT" >/dev/null 2>&1 || true
 }
 trap cleanup EXIT
 sleep 2
@@ -55,11 +58,5 @@ bitcoin-cli -regtest -datadir="$DATADIR" -rpcuser=tesaurus -rpcpassword=changeme
 bitcoin-cli -regtest -datadir="$DATADIR" -rpcuser=tesaurus -rpcpassword=changeme -rpcwallet=miner sendtoaddress "$ADDR" 0.5 >/dev/null
 bitcoin-cli -regtest -datadir="$DATADIR" -rpcuser=tesaurus -rpcpassword=changeme -rpcwallet=miner -generate 10 >/dev/null
 "$TES" -c tesaurus.toml spend --to "$DEST" --amount-sats 50000 --fee-sats 1000 --path recovery --broadcast >/dev/null
-
-bitcoin-cli -regtest -datadir="$DATADIR" -rpcuser=tesaurus -rpcpassword=changeme -rpcwallet=miner sendtoaddress "$ADDR" 0.2 >/dev/null
-bitcoin-cli -regtest -datadir="$DATADIR" -rpcuser=tesaurus -rpcpassword=changeme -rpcwallet=miner -generate 10 >/dev/null
-"$AGENT" -c tesaurus.toml >/tmp/tesaurus-agent-e2e.log 2>&1 &
-sleep 1
-"$TES" -c tesaurus.toml spend --to "$DEST" --amount-sats 30000 --fee-sats 1000 --path recovery --via-agent --broadcast >/dev/null
 
 echo "regtest e2e OK"

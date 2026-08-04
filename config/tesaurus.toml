@@ -3,26 +3,13 @@
 [bitcoin]
 network = "testnet"
 rpc_url = "http://127.0.0.1:18332"
-rpc_user = "tesaurus"
-rpc_password = "changeme"
 wallet_name = "tesaurus"
-# cookie_path = "/home/bitcoin/.bitcoin/testnet3/.cookie"
+# Prefer cookie authentication:
+# cookie_path = "/absolute/path/to/bitcoin/testnet3/.cookie"
+# Or set rpc_user and rpc_password locally. Never commit real credentials.
 
 [vault]
 state_path = "./data/vault.json"
 keys_dir = "./keys"
-# Relative timelock (CSV) before the agent recovery path is available.
-# 10 blocks ≈ 100 minutes on mainnet; use larger values in production.
+# Demo-only relative timelock (CSV) for the recovery path.
 csv_blocks = 10
-
-[agent]
-bind = "127.0.0.1:18480"
-key_path = "./keys/agent.wif"
-# api_token = "replace-with-long-random-token"
-max_amount_sats = 50000000
-allowlist = []
-require_timelock = true
-
-[daemon]
-poll_interval_secs = 30
-agent_url = "http://127.0.0.1:18480"

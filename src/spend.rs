@@ -2,7 +2,7 @@
 
 use crate::descriptor::VaultDescriptor;
 use crate::error::{Error, Result};
-use crate::keys::{KeyRole, VaultKey};
+use crate::keys::VaultKey;
 use crate::wallet::VaultUtxo;
 use bitcoin::absolute::LockTime;
 use bitcoin::ecdsa;
@@ -13,14 +13,16 @@ use bitcoin::transaction::Version;
 use bitcoin::{
     Address, Amount, Network, PublicKey, ScriptBuf, Sequence, Transaction, TxIn, TxOut, Witness,
 };
-use bitcoincore_rpc::{RpcApi, Client};
+use bitcoincore_rpc::{Client, RpcApi};
 use miniscript::Satisfier;
-use serde::{Deserialize, Serialize};
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::str::FromStr;
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(rename_all = "lowercase")]
+const MAX_FEE_SATS: u64 = 1_000_000;
+const MAX_FEE_RATE_SAT_PER_VB: u64 = 100;
+const MAX_SELECTED_INPUTS: usize = 100;
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum SpendPath {
     /// primary + override (always available)
     Primary,
@@ -28,7 +30,7 @@ pub enum SpendPath {
     Recovery,
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone)]
 pub struct SpendRequest {
     pub destination: String,
     pub amount_sats: u64,
@@ -36,7 +38,7 @@ pub struct SpendRequest {
     pub path: SpendPath,
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone)]
 pub struct BuiltSpend {
     pub tx_hex: String,
     pub txid: String,
@@ -44,9 +46,6 @@ pub struct BuiltSpend {
     pub fee_sats: u64,
     pub amount_sats: u64,
     pub change_sats: u64,
-    /// True if the transaction still needs the agent signature.
-    pub needs_agent: bool,
-    pub psbt_incomplete_hex: Option<String>,
 }
 
 struct KeySatisfier<'a> {
@@ -54,7 +53,7 @@ struct KeySatisfier<'a> {
     older_ok: bool,
 }
 
-impl<'a> Satisfier<PublicKey> for KeySatisfier<'a> {
+impl Satisfier<PublicKey> for KeySatisfier<'_> {
     fn lookup_ecdsa_sig(&self, pk: &PublicKey) -> Option<ecdsa::Signature> {
         self.sigs.get(pk).copied()
     }
@@ -85,21 +84,60 @@ impl<'a> SpendBuilder<'a> {
         req: &SpendRequest,
         keys: &[VaultKey],
     ) -> Result<BuiltSpend> {
+        self.vault.require_network(self.network)?;
+        if req.amount_sats == 0 {
+            return Err(Error::spend("amount must be greater than zero"));
+        }
+        if req.fee_sats > MAX_FEE_SATS {
+            return Err(Error::spend(format!(
+                "fee {} exceeds research safety cap of {MAX_FEE_SATS} sats",
+                req.fee_sats
+            )));
+        }
+        if req.fee_sats > req.amount_sats {
+            return Err(Error::spend("fee must not exceed destination amount"));
+        }
+        let target = req
+            .amount_sats
+            .checked_add(req.fee_sats)
+            .ok_or_else(|| Error::spend("amount plus fee overflows u64"))?;
+
         let dest: Address = Address::from_str(&req.destination)
             .map_err(|e| Error::spend(format!("invalid destination: {e}")))?
             .require_network(self.network)
             .map_err(|e| Error::spend(format!("destination network mismatch: {e}")))?;
-
-        let selected = select_coins(utxos, req.amount_sats + req.fee_sats, req.path)?;
-        let total_in: u64 = selected.iter().map(|u| u.txout.value.to_sat()).sum();
-        if total_in < req.amount_sats + req.fee_sats {
+        let destination_script = dest.script_pubkey();
+        let minimum_destination = destination_script.minimal_non_dust().to_sat();
+        if req.amount_sats < minimum_destination {
             return Err(Error::spend(format!(
-                "insufficient funds: have {total_in} sats, need {}",
-                req.amount_sats + req.fee_sats
+                "destination amount {} is below the {minimum_destination}-sat dust threshold",
+                req.amount_sats
             )));
         }
-        let change = total_in - req.amount_sats - req.fee_sats;
+
+        let selected = select_coins(utxos, target, req.path)?;
+        let total_in = selected.iter().try_fold(0u64, |total, utxo| {
+            total
+                .checked_add(utxo.txout.value.to_sat())
+                .ok_or_else(|| Error::spend("selected input total overflows u64"))
+        })?;
+        if total_in < target {
+            return Err(Error::spend(format!(
+                "insufficient funds: have {total_in} sats, need {target}"
+            )));
+        }
+        let change = total_in
+            .checked_sub(target)
+            .ok_or_else(|| Error::spend("selected input total is below amount plus fee"))?;
         let change_addr = self.vault.address()?;
+        let change_script = change_addr.script_pubkey();
+        let minimum_change = change_script.minimal_non_dust().to_sat();
+        if change > 0 && change < minimum_change {
+            return Err(Error::spend(format!(
+                "change of {change} sats is below the {minimum_change}-sat dust threshold; \
+                 adjust amount or fee"
+            )));
+        }
 
         let sequence = match req.path {
             SpendPath::Primary => Sequence::ENABLE_RBF_NO_LOCKTIME,
@@ -108,12 +146,12 @@ impl<'a> SpendBuilder<'a> {
 
         let mut outputs = vec![TxOut {
             value: Amount::from_sat(req.amount_sats),
-            script_pubkey: dest.script_pubkey(),
+            script_pubkey: destination_script,
         }];
-        if change > 546 {
+        if change > 0 {
             outputs.push(TxOut {
                 value: Amount::from_sat(change),
-                script_pubkey: change_addr.script_pubkey(),
+                script_pubkey: change_script,
             });
         }
 
@@ -175,29 +213,29 @@ impl<'a> SpendBuilder<'a> {
                     tx.input[vin].witness = Witness::from_slice(&witness);
                 }
                 Err(_) => {
-                    // Not enough signatures yet — leave unsigned for agent completion.
-                    if req.path != SpendPath::Recovery {
-                        return Err(Error::spend(
-                            "could not satisfy primary path; need primary + override keys",
-                        ));
-                    }
-                    // Build a partial witness isn't trivial without PSBT; return unsigned tx hex
-                    // and let agent_sign complete via re-sign with combined keys.
-                    return Ok(BuiltSpend {
-                        tx_hex: bitcoin::consensus::encode::serialize_hex(&tx),
-                        txid: tx.compute_txid().to_string(),
-                        path: req.path,
-                        fee_sats: req.fee_sats,
-                        amount_sats: req.amount_sats,
-                        change_sats: change,
-                        needs_agent: true,
-                        psbt_incomplete_hex: Some(bitcoin::consensus::encode::serialize_hex(&tx)),
-                    });
+                    let required = match req.path {
+                        SpendPath::Primary => "primary + override",
+                        SpendPath::Recovery => "two local recovery-path keys",
+                    };
+                    return Err(Error::spend(format!(
+                        "could not satisfy {0:?} path; need {required}; network co-signing is disabled",
+                        req.path
+                    )));
                 }
             }
         }
 
-        let needs_agent = false;
+        let maximum_fee = u64::try_from(tx.vsize())
+            .ok()
+            .and_then(|vsize| vsize.checked_mul(MAX_FEE_RATE_SAT_PER_VB))
+            .ok_or_else(|| Error::spend("transaction fee-rate calculation overflowed"))?;
+        if req.fee_sats > maximum_fee {
+            return Err(Error::spend(format!(
+                "fee {} exceeds research cap of {MAX_FEE_RATE_SAT_PER_VB} sat/vB for this transaction",
+                req.fee_sats
+            )));
+        }
+
         Ok(BuiltSpend {
             tx_hex: bitcoin::consensus::encode::serialize_hex(&tx),
             txid: tx.compute_txid().to_string(),
@@ -205,8 +243,6 @@ impl<'a> SpendBuilder<'a> {
             fee_sats: req.fee_sats,
             amount_sats: req.amount_sats,
             change_sats: change,
-            needs_agent,
-            psbt_incomplete_hex: None,
         })
     }
 }
@@ -225,8 +261,15 @@ fn select_coins(utxos: &[VaultUtxo], need: u64, path: SpendPath) -> Result<Vec<V
     let mut selected = Vec::new();
     let mut total = 0u64;
     for u in candidates {
-        total += u.txout.value.to_sat();
+        total = total
+            .checked_add(u.txout.value.to_sat())
+            .ok_or_else(|| Error::spend("available input total overflows u64"))?;
         selected.push(u);
+        if selected.len() > MAX_SELECTED_INPUTS {
+            return Err(Error::spend(format!(
+                "spend requires more than {MAX_SELECTED_INPUTS} inputs"
+            )));
+        }
         if total >= need {
             return Ok(selected);
         }
@@ -249,36 +292,192 @@ pub fn sign_recovery_with_keys(
     SpendBuilder::new(vault, network).build_and_sign(utxos, &req, keys)
 }
 
-pub fn broadcast(client: &Client, tx_hex: &str) -> Result<String> {
-    let raw = hex::decode(tx_hex).map_err(|e| Error::spend(format!("invalid tx hex: {e}")))?;
-    let tx: Transaction = bitcoin::consensus::deserialize(&raw)
-        .map_err(|e| Error::spend(format!("tx decode: {e}")))?;
-    let txid = client.send_raw_transaction(&tx)?;
-    Ok(txid.to_string())
-}
-
-/// Re-sign helper used by the agent service: given an unsigned/partial recovery tx template
-/// rebuilt from the same request, produce a fully signed transaction.
-pub fn agent_cosign(
+pub fn validate_built_spend(
+    built: &BuiltSpend,
     vault: &VaultDescriptor,
     network: Network,
-    utxos: &[VaultUtxo],
+    available_utxos: &[VaultUtxo],
     req: &SpendRequest,
-    primary: &VaultKey,
-    agent: &VaultKey,
-) -> Result<BuiltSpend> {
-    if primary.role != KeyRole::Primary || agent.role != KeyRole::Agent {
-        return Err(Error::spend("agent cosign requires primary + agent keys"));
+) -> Result<Transaction> {
+    vault.require_network(network)?;
+    if req.amount_sats == 0 || req.fee_sats > MAX_FEE_SATS || req.fee_sats > req.amount_sats {
+        return Err(Error::spend(
+            "requested amount or fee violates research safety limits",
+        ));
     }
-    sign_recovery_with_keys(vault, network, utxos, req, &[primary.clone(), agent.clone()])
+    if built.path != req.path
+        || built.amount_sats != req.amount_sats
+        || built.fee_sats != req.fee_sats
+    {
+        return Err(Error::spend(
+            "built transaction metadata does not match the requested spend",
+        ));
+    }
+
+    let raw =
+        hex::decode(&built.tx_hex).map_err(|e| Error::spend(format!("invalid tx hex: {e}")))?;
+    let tx: Transaction = bitcoin::consensus::deserialize(&raw)
+        .map_err(|e| Error::spend(format!("tx decode: {e}")))?;
+    if tx.compute_txid().to_string() != built.txid {
+        return Err(Error::spend("reported txid does not match transaction"));
+    }
+    if tx.input.is_empty() {
+        return Err(Error::spend("transaction has no inputs"));
+    }
+    if tx.input.len() > MAX_SELECTED_INPUTS {
+        return Err(Error::spend(
+            "transaction exceeds the input-count safety limit",
+        ));
+    }
+    if tx.version != Version::TWO || tx.lock_time != LockTime::ZERO {
+        return Err(Error::spend(
+            "transaction version or lock time does not match the builder",
+        ));
+    }
+    let maximum_fee = u64::try_from(tx.vsize())
+        .ok()
+        .and_then(|vsize| vsize.checked_mul(MAX_FEE_RATE_SAT_PER_VB))
+        .ok_or_else(|| Error::spend("transaction fee-rate calculation overflowed"))?;
+    if req.fee_sats > maximum_fee {
+        return Err(Error::spend(
+            "transaction exceeds the fee-rate safety limit",
+        ));
+    }
+
+    let vault_script = vault.address()?.script_pubkey();
+    let available: HashMap<_, _> = available_utxos
+        .iter()
+        .map(|utxo| (utxo.outpoint, utxo))
+        .collect();
+    let expected_sequence = match req.path {
+        SpendPath::Primary => Sequence::ENABLE_RBF_NO_LOCKTIME,
+        SpendPath::Recovery => Sequence::from_height(vault.csv_blocks as u16),
+    };
+    let mut seen = HashSet::new();
+    let mut total_in = 0u64;
+    for input in &tx.input {
+        if !seen.insert(input.previous_output) {
+            return Err(Error::spend("transaction contains a duplicate input"));
+        }
+        let utxo = available
+            .get(&input.previous_output)
+            .ok_or_else(|| Error::spend("transaction contains an unknown input"))?;
+        if utxo.txout.script_pubkey != vault_script {
+            return Err(Error::spend(
+                "input does not belong to the configured vault",
+            ));
+        }
+        let spendable = match req.path {
+            SpendPath::Primary => utxo.spendable_primary,
+            SpendPath::Recovery => utxo.spendable_recovery,
+        };
+        if !spendable {
+            return Err(Error::spend("input is not spendable on the requested path"));
+        }
+        if input.sequence != expected_sequence {
+            return Err(Error::spend(
+                "input sequence does not match the requested path",
+            ));
+        }
+        if input.witness.is_empty() {
+            return Err(Error::spend("transaction input is missing a witness"));
+        }
+        total_in = total_in
+            .checked_add(utxo.txout.value.to_sat())
+            .ok_or_else(|| Error::spend("transaction input total overflows u64"))?;
+    }
+
+    let destination = Address::from_str(&req.destination)
+        .map_err(|e| Error::spend(format!("invalid destination: {e}")))?
+        .require_network(network)
+        .map_err(|e| Error::spend(format!("destination network mismatch: {e}")))?;
+    let destination_script = destination.script_pubkey();
+    if req.amount_sats < destination_script.minimal_non_dust().to_sat() {
+        return Err(Error::spend("destination output is dust"));
+    }
+    let expected_output_count = if built.change_sats > 0 { 2 } else { 1 };
+    if tx.output.len() != expected_output_count {
+        return Err(Error::spend("transaction has unexpected outputs"));
+    }
+    if tx.output[0].value.to_sat() != req.amount_sats
+        || tx.output[0].script_pubkey != destination_script
+    {
+        return Err(Error::spend(
+            "transaction destination output does not match the request",
+        ));
+    }
+    if built.change_sats > 0
+        && (built.change_sats < vault_script.minimal_non_dust().to_sat()
+            || tx.output[1].value.to_sat() != built.change_sats
+            || tx.output[1].script_pubkey != vault_script)
+    {
+        return Err(Error::spend(
+            "transaction change output does not return to the configured vault",
+        ));
+    }
+
+    let total_out = tx.output.iter().try_fold(0u64, |total, output| {
+        total
+            .checked_add(output.value.to_sat())
+            .ok_or_else(|| Error::spend("transaction output total overflows u64"))
+    })?;
+    let actual_fee = total_in
+        .checked_sub(total_out)
+        .ok_or_else(|| Error::spend("transaction outputs exceed its known inputs"))?;
+    if actual_fee != req.fee_sats {
+        return Err(Error::spend(format!(
+            "transaction fee {actual_fee} does not match requested fee {}",
+            req.fee_sats
+        )));
+    }
+    let expected_change = total_in
+        .checked_sub(
+            req.amount_sats
+                .checked_add(req.fee_sats)
+                .ok_or_else(|| Error::spend("amount plus fee overflows u64"))?,
+        )
+        .ok_or_else(|| Error::spend("known inputs are below amount plus fee"))?;
+    if built.change_sats != expected_change {
+        return Err(Error::spend(
+            "reported change does not match known inputs and outputs",
+        ));
+    }
+
+    Ok(tx)
+}
+
+pub fn broadcast(client: &Client, tx: &Transaction) -> Result<String> {
+    let results = client.test_mempool_accept(&[tx])?;
+    if results.len() != 1 {
+        return Err(Error::spend(format!(
+            "Bitcoin Core returned {} mempool-acceptance results for one transaction",
+            results.len()
+        )));
+    }
+    let result = results
+        .first()
+        .ok_or_else(|| Error::spend("Bitcoin Core returned no mempool-acceptance result"))?;
+    if result.txid != tx.compute_txid() {
+        return Err(Error::spend(
+            "Bitcoin Core returned a mismatched transaction ID",
+        ));
+    }
+    if !result.allowed {
+        return Err(Error::spend(format!(
+            "Bitcoin Core rejected transaction before broadcast: {}",
+            result.reject_reason.as_deref().unwrap_or("unknown reason")
+        )));
+    }
+    let txid = client.send_raw_transaction(tx)?;
+    Ok(txid.to_string())
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
     use crate::keys::KeyRole;
-    use bitcoin::OutPoint;
     use bitcoin::secp256k1::SecretKey;
+    use bitcoin::OutPoint;
 
     fn key(role: KeyRole, seed: u8) -> VaultKey {
         let mut buf = [seed; 32];
@@ -330,11 +529,16 @@ mod tests {
             path: SpendPath::Primary,
         };
 
+        let utxos = [utxo];
         let built = SpendBuilder::new(&vault, Network::Regtest)
-            .build_and_sign(&[utxo], &req, &[primary, override_key])
+            .build_and_sign(&utxos, &req, &[primary, override_key])
             .unwrap();
-        assert!(!built.needs_agent);
         assert!(!built.tx_hex.is_empty());
+        validate_built_spend(&built, &vault, Network::Regtest, &utxos, &req).unwrap();
+
+        let mut tampered = built;
+        tampered.txid = "00".into();
+        assert!(validate_built_spend(&tampered, &vault, Network::Regtest, &utxos, &req).is_err());
     }
 
     #[test]
@@ -378,13 +582,78 @@ mod tests {
             path: SpendPath::Recovery,
         };
 
+        let utxos = [utxo];
         let built = SpendBuilder::new(&vault, Network::Regtest)
-            .build_and_sign(&[utxo], &req, &[primary, agent])
+            .build_and_sign(&utxos, &req, &[primary, agent])
             .unwrap();
-        assert!(!built.needs_agent);
         let tx: Transaction =
             bitcoin::consensus::deserialize(&hex::decode(&built.tx_hex).unwrap()).unwrap();
         assert_eq!(tx.input[0].sequence, Sequence::from_height(10));
         assert!(tx.input[0].witness.len() >= 3);
+        validate_built_spend(&built, &vault, Network::Regtest, &utxos, &req).unwrap();
+    }
+
+    #[test]
+    fn recovery_with_one_key_fails_instead_of_returning_partial_tx() {
+        let secp = Secp256k1::new();
+        let primary = key(KeyRole::Primary, 31);
+        let vault = VaultDescriptor::build(
+            primary.public_key(&secp),
+            key(KeyRole::Override, 32).public_key(&secp),
+            key(KeyRole::Agent, 33).public_key(&secp),
+            10,
+            Network::Regtest,
+        )
+        .unwrap();
+        let utxo = VaultUtxo {
+            outpoint: OutPoint::null(),
+            txout: TxOut {
+                value: Amount::from_sat(250_000),
+                script_pubkey: vault.address().unwrap().script_pubkey(),
+            },
+            confirmations: 20,
+            spendable_primary: true,
+            spendable_recovery: true,
+        };
+        let req = SpendRequest {
+            destination: vault.receive_address.clone(),
+            amount_sats: 100_000,
+            fee_sats: 1_000,
+            path: SpendPath::Recovery,
+        };
+
+        let err = SpendBuilder::new(&vault, Network::Regtest)
+            .build_and_sign(&[utxo], &req, &[primary])
+            .unwrap_err()
+            .to_string();
+        assert!(err.contains("two local recovery-path keys"));
+        assert!(err.contains("network co-signing is disabled"));
+    }
+
+    #[test]
+    fn rejects_arithmetic_overflow_before_coin_selection() {
+        let secp = Secp256k1::new();
+        let primary = key(KeyRole::Primary, 21);
+        let override_key = key(KeyRole::Override, 22);
+        let vault = VaultDescriptor::build(
+            primary.public_key(&secp),
+            override_key.public_key(&secp),
+            key(KeyRole::Agent, 23).public_key(&secp),
+            10,
+            Network::Regtest,
+        )
+        .unwrap();
+        let req = SpendRequest {
+            destination: vault.receive_address.clone(),
+            amount_sats: u64::MAX,
+            fee_sats: 1,
+            path: SpendPath::Primary,
+        };
+
+        let err = SpendBuilder::new(&vault, Network::Regtest)
+            .build_and_sign(&[], &req, &[primary, override_key])
+            .unwrap_err()
+            .to_string();
+        assert!(err.contains("overflows u64"));
     }
 }

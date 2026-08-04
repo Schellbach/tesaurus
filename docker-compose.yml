@@ -9,13 +9,15 @@ services:
       - -fallbackfee=0.0002
       - -rpcuser=tesaurus
       - -rpcpassword=changeme
-      - -rpcallowip=0.0.0.0/0
+      - -rpcallowip=172.16.0.0/12
       - -rpcbind=0.0.0.0
       - -printtoconsole
     ports:
-      - "18443:18443"
+      - "127.0.0.1:18443:18443"
     volumes:
       - bitcoind-data:/home/bitcoin/.bitcoin
+    security_opt:
+      - no-new-privileges:true
     healthcheck:
       test: ["CMD", "bitcoin-cli", "-regtest", "-rpcuser=tesaurus", "-rpcpassword=changeme", "getblockchaininfo"]
       interval: 5s
