@@ -1,5 +1,5 @@
 # Multi-stage research image for the local Tesaurus CLI.
-FROM rust:1.85-bookworm AS builder
+FROM rust:1.97-bookworm AS builder
 WORKDIR /app
 COPY Cargo.toml Cargo.lock ./
 COPY src ./src
