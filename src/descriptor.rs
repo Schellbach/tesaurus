@@ -15,6 +15,7 @@ use std::str::FromStr;
 /// - After `csv` confirmations on a coin: any two of {primary, override, agent}
 ///   (typically **primary + agent** for recovery)
 #[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct VaultDescriptor {
     pub descriptor: String,
     pub csv_blocks: u32,
@@ -33,6 +34,19 @@ impl VaultDescriptor {
         csv_blocks: u32,
         network: Network,
     ) -> Result<Self> {
+        if network == Network::Bitcoin {
+            return Err(Error::descriptor(
+                "mainnet vault construction is disabled in this experimental release",
+            ));
+        }
+        if !matches!(
+            network,
+            Network::Regtest | Network::Testnet | Network::Signet
+        ) {
+            return Err(Error::descriptor(format!(
+                "network {network} is not enabled for vault construction"
+            )));
+        }
         if csv_blocks == 0 || csv_blocks > 65535 {
             return Err(Error::descriptor(
                 "csv_blocks must be in 1..=65535 for relative timelocks",
@@ -72,7 +86,44 @@ impl VaultDescriptor {
             .map_err(|e| Error::descriptor(format!("failed to parse stored descriptor: {e}")))
     }
 
+    pub fn validate(&self) -> Result<()> {
+        let parsed = self.parsed()?;
+        parsed.sanity_check().map_err(|e| {
+            Error::descriptor(format!("stored descriptor failed sanity check: {e}"))
+        })?;
+
+        let network = Network::from_str(&self.network)
+            .map_err(|_| Error::descriptor(format!("invalid network {}", self.network)))?;
+        let (primary, override_key, agent) = self.pubkeys()?;
+        let canonical = Self::build(primary, override_key, agent, self.csv_blocks, network)?;
+
+        if canonical.descriptor != self.descriptor {
+            return Err(Error::descriptor(
+                "stored descriptor does not match its pubkeys or csv_blocks",
+            ));
+        }
+        if canonical.receive_address != self.receive_address {
+            return Err(Error::descriptor(
+                "stored receive_address does not match the descriptor",
+            ));
+        }
+        Ok(())
+    }
+
+    pub fn require_network(&self, expected: Network) -> Result<()> {
+        self.validate()?;
+        let actual = Network::from_str(&self.network)
+            .map_err(|_| Error::descriptor(format!("invalid network {}", self.network)))?;
+        if actual != expected {
+            return Err(Error::descriptor(format!(
+                "vault network {actual} does not match configured network {expected}"
+            )));
+        }
+        Ok(())
+    }
+
     pub fn address(&self) -> Result<Address> {
+        self.validate()?;
         let network = Network::from_str(&self.network)
             .map_err(|_| Error::descriptor(format!("invalid network {}", self.network)))?;
         self.parsed()?
@@ -113,6 +164,40 @@ mod tests {
         let v = VaultDescriptor::build(pk(1), pk(2), pk(3), 10, Network::Regtest).unwrap();
         assert!(v.descriptor.starts_with("wsh(thresh(2,"));
         assert!(v.receive_address.starts_with("bcrt1"));
-        v.parsed().unwrap().sanity_check().unwrap();
+        v.validate().unwrap();
+    }
+
+    #[test]
+    fn rejects_tampered_metadata() {
+        let original = VaultDescriptor::build(pk(1), pk(2), pk(3), 10, Network::Regtest).unwrap();
+
+        let mut address_tamper = original.clone();
+        address_tamper.receive_address =
+            VaultDescriptor::build(pk(4), pk(5), pk(6), 10, Network::Regtest)
+                .unwrap()
+                .receive_address;
+        assert!(address_tamper.validate().is_err());
+
+        let mut csv_tamper = original;
+        csv_tamper.csv_blocks = 11;
+        assert!(csv_tamper.validate().is_err());
+    }
+
+    #[test]
+    fn rejects_network_mismatch() {
+        let vault = VaultDescriptor::build(pk(1), pk(2), pk(3), 10, Network::Regtest).unwrap();
+        let err = vault
+            .require_network(Network::Testnet)
+            .unwrap_err()
+            .to_string();
+        assert!(err.contains("does not match configured network"));
+    }
+
+    #[test]
+    fn rejects_mainnet_vault_construction() {
+        let err = VaultDescriptor::build(pk(1), pk(2), pk(3), 10, Network::Bitcoin)
+            .unwrap_err()
+            .to_string();
+        assert!(err.contains("mainnet vault construction is disabled"));
     }
 }

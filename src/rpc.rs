@@ -4,15 +4,23 @@ use crate::config::BitcoinConfig;
 use crate::error::{Error, Result};
 use bitcoincore_rpc::jsonrpc::serde_json::{json, Value};
 use bitcoincore_rpc::{Auth, Client, RpcApi};
-use std::path::PathBuf;
 
 pub struct BitcoinRpc {
     client: Client,
-    wallet_name: String,
 }
 
 impl BitcoinRpc {
     pub fn connect(cfg: &BitcoinConfig) -> Result<Self> {
+        cfg.validate()?;
+        let expected_network = cfg.network()?;
+        if !matches!(
+            expected_network,
+            bitcoin::Network::Regtest | bitcoin::Network::Testnet | bitcoin::Network::Signet
+        ) {
+            return Err(Error::config(
+                "Bitcoin Core connections are disabled for this network",
+            ));
+        }
         let auth = if let Some(cookie) = &cfg.cookie_path {
             Auth::CookieFile(cookie.clone())
         } else if let (Some(user), Some(pass)) = (&cfg.rpc_user, &cfg.rpc_password) {
@@ -25,6 +33,12 @@ impl BitcoinRpc {
 
         let base = Client::new(&cfg.rpc_url, auth.clone())
             .map_err(|e| Error::wallet(format!("RPC connect failed: {e}")))?;
+        let actual_network = base.get_blockchain_info()?.chain;
+        if actual_network != expected_network {
+            return Err(Error::wallet(format!(
+                "Bitcoin Core network {actual_network} does not match configured network {expected_network}"
+            )));
+        }
 
         // Ensure wallet exists / is loaded.
         ensure_wallet(&base, &cfg.wallet_name)?;
@@ -33,34 +47,15 @@ impl BitcoinRpc {
         let client = Client::new(&wallet_url, auth)
             .map_err(|e| Error::wallet(format!("wallet RPC connect failed: {e}")))?;
 
-        Ok(Self {
-            client,
-            wallet_name: cfg.wallet_name.clone(),
-        })
+        Ok(Self { client })
     }
 
     pub fn client(&self) -> &Client {
         &self.client
     }
 
-    pub fn wallet_name(&self) -> &str {
-        &self.wallet_name
-    }
-
-    pub fn network_info(&self) -> Result<bitcoincore_rpc::json::GetNetworkInfoResult> {
-        Ok(self.client.get_network_info()?)
-    }
-
     pub fn block_count(&self) -> Result<u64> {
         Ok(self.client.get_block_count()?)
-    }
-
-    pub fn call_raw(&self, method: &str, params: &[Value]) -> Result<Value> {
-        // bitcoincore-rpc doesn't expose arbitrary calls on all versions; use JSON-RPC via get_jsonrpc?
-        // Prefer typed APIs. This helper uses `call` when available.
-        self.client
-            .call(method, params)
-            .map_err(Error::from)
     }
 }
 
@@ -99,20 +94,6 @@ fn ensure_wallet(client: &Client, name: &str) -> Result<()> {
     }
 }
 
-/// Convenience for tests / tooling that want a cookie auth client without wallet path.
-pub fn auth_from_env_or_config(cfg: &BitcoinConfig) -> Result<Auth> {
-    if let Ok(cookie) = std::env::var("BITCOIN_COOKIE") {
-        return Ok(Auth::CookieFile(PathBuf::from(cookie)));
-    }
-    if let Some(cookie) = &cfg.cookie_path {
-        return Ok(Auth::CookieFile(cookie.clone()));
-    }
-    if let (Some(user), Some(pass)) = (&cfg.rpc_user, &cfg.rpc_password) {
-        return Ok(Auth::UserPass(user.clone(), pass.clone()));
-    }
-    Err(Error::config("missing Bitcoin RPC credentials"))
-}
-
 pub fn import_watch_descriptor(client: &Client, descriptor: &str, label: &str) -> Result<()> {
     // Fixed-key (non-ranged) descriptors cannot be `active` in Bitcoin Core.
     // Import as watch-only and verify each request succeeded.
@@ -128,7 +109,10 @@ pub fn import_watch_descriptor(client: &Client, descriptor: &str, label: &str) -
         .as_array()
         .ok_or_else(|| Error::wallet(format!("unexpected importdescriptors response: {res}")))?;
     for (i, item) in arr.iter().enumerate() {
-        let ok = item.get("success").and_then(|v| v.as_bool()).unwrap_or(false);
+        let ok = item
+            .get("success")
+            .and_then(|v| v.as_bool())
+            .unwrap_or(false);
         if !ok {
             return Err(Error::wallet(format!(
                 "importdescriptors[{i}] failed: {item}"

@@ -1,0 +1,149 @@
+name: Security CI
+
+on:
+  push:
+  pull_request:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: security-ci-${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  rust:
+    name: Format, test, lint, and build
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+      - name: Check out source
+        uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+      - name: Show pinned toolchain
+        run: rustc --version && cargo --version
+      - name: Check formatting
+        run: cargo fmt --check
+      - name: Run tests
+        run: cargo test --locked
+      - name: Run Clippy
+        run: cargo clippy --locked --all-targets -- -D warnings
+      - name: Verify fail-closed entry points
+        shell: bash
+        run: |
+          set -euo pipefail
+          if output="$(cargo run --quiet --bin tesaurus-agent -- 2>&1)"; then
+            echo "tesaurus-agent unexpectedly started"
+            exit 1
+          fi
+          case "$output" in
+            *"PSBT-only"*) ;;
+            *) echo "tesaurus-agent did not report PSBT containment"; exit 1 ;;
+          esac
+          if cargo run --quiet --bin tesaurus -- init-config \
+            --network mainnet --path /tmp/tesaurus-mainnet.toml; then
+            echo "mainnet configuration unexpectedly succeeded"
+            exit 1
+          fi
+          test ! -e /tmp/tesaurus-mainnet.toml
+          if cargo run --quiet --bin tesaurus -- spend \
+            --to invalid --amount-sats 1 --via-agent; then
+            echo "--via-agent unexpectedly succeeded"
+            exit 1
+          fi
+      - name: Build release binaries
+        run: cargo build --release --locked --bins
+
+  container:
+    name: Container containment
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+      - name: Check out source
+        uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+      - name: Validate Compose file
+        run: docker compose config --quiet
+      - name: Build research CLI image
+        run: docker build --tag tesaurus-containment:ci .
+      - name: Verify image surface
+        shell: bash
+        run: |
+          set -euo pipefail
+          docker run --rm tesaurus-containment:ci --help
+          docker run --rm --entrypoint sh tesaurus-containment:ci \
+            -c 'test ! -e /usr/local/bin/tesaurus-agent'
+          test "$(docker image inspect \
+            --format '{{json .Config.ExposedPorts}}' tesaurus-containment:ci)" = "null"
+
+  regtest:
+    name: Bitcoin Core regtest
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+      - name: Check out source
+        uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+      - name: Start isolated Bitcoin Core
+        run: docker compose up -d bitcoind
+      - name: Build release CLI
+        run: cargo build --release --locked --bin tesaurus
+      - name: Exercise primary and recovery broadcasts
+        shell: bash
+        run: |
+          set -euo pipefail
+          bitcoin_cli() {
+            docker compose --file "$GITHUB_WORKSPACE/docker-compose.yml" \
+              exec -T bitcoind bitcoin-cli \
+              -regtest -rpcuser=tesaurus -rpcpassword=changeme "$@"
+          }
+          for _ in $(seq 1 30); do
+            if bitcoin_cli getblockchaininfo >/dev/null 2>&1; then
+              break
+            fi
+            sleep 2
+          done
+          bitcoin_cli getblockchaininfo >/dev/null
+          bitcoin_cli createwallet miner >/dev/null
+          bitcoin_cli -rpcwallet=miner -generate 101 >/dev/null
+
+          WORK=/tmp/tesaurus-regtest-ci
+          rm -rf "$WORK"
+          mkdir -p "$WORK"
+          cp config/tesaurus.regtest.toml "$WORK/tesaurus.toml"
+          chmod 600 "$WORK/tesaurus.toml"
+          TES="$GITHUB_WORKSPACE/target/release/tesaurus"
+
+          cd "$WORK"
+          "$TES" -c tesaurus.toml keys generate >/dev/null
+          "$TES" -c tesaurus.toml init-vault >/dev/null
+          "$TES" -c tesaurus.toml import-watch >/dev/null
+          ADDR="$("$TES" -c tesaurus.toml address | awk 'NR == 1 { print; exit }')"
+          DEST="$(bitcoin_cli -rpcwallet=miner getnewaddress)"
+
+          bitcoin_cli -rpcwallet=miner sendtoaddress "$ADDR" 1 >/dev/null
+          bitcoin_cli -rpcwallet=miner -generate 1 >/dev/null
+          "$TES" -c tesaurus.toml spend --to "$DEST" \
+            --amount-sats 100000 --fee-sats 1000 --path primary --broadcast >/dev/null
+          bitcoin_cli -rpcwallet=miner -generate 1 >/dev/null
+
+          bitcoin_cli -rpcwallet=miner sendtoaddress "$ADDR" 0.5 >/dev/null
+          bitcoin_cli -rpcwallet=miner -generate 10 >/dev/null
+          "$TES" -c tesaurus.toml spend --to "$DEST" \
+            --amount-sats 50000 --fee-sats 1000 --path recovery --broadcast >/dev/null
+      - name: Stop isolated Bitcoin Core
+        if: always()
+        run: docker compose down --volumes
+
+  dependencies:
+    name: RustSec dependency audit
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    permissions:
+      contents: read
+      checks: write
+    steps:
+      - name: Check out source
+        uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+      - name: Scan Cargo.lock
+        uses: rustsec/audit-check@69366f33c96575abad1ee0dba8212993eecbe998 # v2.0.0
+        with:
+          token: ${{ secrets.GITHUB_TOKEN }}

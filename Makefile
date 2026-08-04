@@ -1,19 +1,27 @@
-.PHONY: build release test fmt clippy clean example-config
+.PHONY: build release test fmt fmt-check clippy audit verify clean example-config
 
 build:
-	cargo build
+	cargo build --locked
 
 release:
-	cargo build --release
+	cargo build --release --locked
 
 test:
-	cargo test
+	cargo test --locked
 
 fmt:
 	cargo fmt
 
+fmt-check:
+	cargo fmt --check
+
 clippy:
-	cargo clippy --all-targets -- -D warnings
+	cargo clippy --locked --all-targets -- -D warnings
+
+audit:
+	cargo audit
+
+verify: fmt-check test clippy audit
 
 clean:
 	cargo clean

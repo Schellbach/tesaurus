@@ -8,12 +8,15 @@ use tesaurus::config::Config;
 use tesaurus::descriptor::VaultDescriptor;
 use tesaurus::keys::{generate_vault_keys, load_key, KeyRole};
 use tesaurus::rpc::BitcoinRpc;
-use tesaurus::spend::{broadcast, SpendBuilder, SpendPath, SpendRequest};
+use tesaurus::spend::{broadcast, validate_built_spend, SpendBuilder, SpendPath, SpendRequest};
 use tesaurus::wallet::{VaultState, VaultWallet};
-use tracing::info;
 
 #[derive(Parser, Debug)]
-#[command(name = "tesaurus", version, about = "Sovereign Bitcoin vault with agent recovery")]
+#[command(
+    name = "tesaurus",
+    version,
+    about = "Experimental Bitcoin vault research (mainnet and network co-signing disabled)"
+)]
 struct Cli {
     /// Path to tesaurus.toml
     #[arg(short, long, global = true, default_value = "config/tesaurus.toml")]
@@ -62,7 +65,10 @@ enum Commands {
         path: PathArg,
         #[arg(long)]
         broadcast: bool,
-        /// Ask local agent to co-sign (recovery path)
+        /// Print signed transaction hex (may reveal payment metadata)
+        #[arg(long)]
+        show_transaction: bool,
+        /// Disabled until the agent uses a reviewed PSBT-only protocol
         #[arg(long)]
         via_agent: bool,
     },
@@ -70,10 +76,7 @@ enum Commands {
 
 #[derive(Subcommand, Debug)]
 enum KeysCmd {
-    Generate {
-        #[arg(long)]
-        force: bool,
-    },
+    Generate,
 }
 
 #[derive(Clone, Debug, ValueEnum)]
@@ -91,33 +94,24 @@ impl From<PathArg> for SpendPath {
     }
 }
 
-#[tokio::main]
-async fn main() -> Result<()> {
-    tracing_subscriber::fmt()
-        .with_env_filter(
-            tracing_subscriber::EnvFilter::try_from_default_env()
-                .unwrap_or_else(|_| tracing_subscriber::EnvFilter::new("info")),
-        )
-        .init();
-
+fn main() -> Result<()> {
     let cli = Cli::parse();
     match cli.command {
-        Commands::InitConfig { path, network, force } => {
-            if path.exists() && !force {
-                bail!("{} exists (pass --force to overwrite)", path.display());
-            }
-            if let Some(parent) = path.parent() {
-                std::fs::create_dir_all(parent)?;
-            }
-            std::fs::write(&path, Config::example_toml(&network))?;
+        Commands::InitConfig {
+            path,
+            network,
+            force,
+        } => {
+            let contents = Config::example_toml(&network)?;
+            write_private_file(&path, &contents, force)?;
             println!("wrote {}", path.display());
         }
         Commands::Keys { cmd } => {
             let cfg = Config::load(&cli.config).context("load config")?;
             let network = cfg.network()?;
             match cmd {
-                KeysCmd::Generate { force } => {
-                    let pubs = generate_vault_keys(&cfg.vault.keys_dir, network, force)?;
+                KeysCmd::Generate => {
+                    let pubs = generate_vault_keys(&cfg.vault.keys_dir, network)?;
                     println!("generated keys in {}", cfg.vault.keys_dir.display());
                     println!("primary:  {}", pubs.primary);
                     println!("override: {}", pubs.override_key);
@@ -156,31 +150,45 @@ async fn main() -> Result<()> {
         }
         Commands::Address => {
             let cfg = Config::load(&cli.config)?;
-            let state = VaultState::load(&cfg.vault.state_path)?;
+            let network = cfg.network()?;
+            let state = load_state(&cfg, network)?;
             println!("{}", state.vault.receive_address);
             println!("{}", state.vault.descriptor);
         }
         Commands::ImportWatch => {
             let cfg = Config::load(&cli.config)?;
-            let state = VaultState::load(&cfg.vault.state_path)?;
+            let network = cfg.network()?;
+            let state = load_state(&cfg, network)?;
             let rpc = BitcoinRpc::connect(&cfg.bitcoin)?;
             let wallet = VaultWallet::open(state, rpc);
             wallet.import_watch_only()?;
-            println!("imported watch-only descriptor into wallet '{}'", cfg.bitcoin.wallet_name);
+            println!(
+                "imported watch-only descriptor into wallet '{}'",
+                cfg.bitcoin.wallet_name
+            );
         }
         Commands::Status => {
             let cfg = Config::load(&cli.config)?;
-            let state = VaultState::load(&cfg.vault.state_path)?;
+            let network = cfg.network()?;
+            let state = load_state(&cfg, network)?;
             let rpc = BitcoinRpc::connect(&cfg.bitcoin)?;
             let tip = rpc.block_count()?;
             let wallet = VaultWallet::open(state.clone(), rpc);
             let utxos = wallet.list_utxos()?;
-            let balance: u64 = utxos.iter().map(|u| u.txout.value.to_sat()).sum();
-            let recoverable: u64 = utxos
-                .iter()
-                .filter(|u| u.spendable_recovery)
-                .map(|u| u.txout.value.to_sat())
-                .sum();
+            let balance = utxos.iter().try_fold(0u64, |total, utxo| {
+                total
+                    .checked_add(utxo.txout.value.to_sat())
+                    .context("wallet balance overflows u64")
+            })?;
+            let recoverable =
+                utxos
+                    .iter()
+                    .filter(|u| u.spendable_recovery)
+                    .try_fold(0u64, |total, utxo| {
+                        total
+                            .checked_add(utxo.txout.value.to_sat())
+                            .context("recoverable balance overflows u64")
+                    })?;
             println!("network:     {}", cfg.bitcoin.network);
             println!("tip:         {tip}");
             println!("address:     {}", state.vault.receive_address);
@@ -205,11 +213,13 @@ async fn main() -> Result<()> {
             fee_sats,
             path,
             broadcast: do_broadcast,
+            show_transaction,
             via_agent,
         } => {
+            ensure_network_agent_disabled(via_agent)?;
             let cfg = Config::load(&cli.config)?;
             let network = cfg.network()?;
-            let state = VaultState::load(&cfg.vault.state_path)?;
+            let state = load_state(&cfg, network)?;
             let rpc = BitcoinRpc::connect(&cfg.bitcoin)?;
             let wallet = VaultWallet::open(state.clone(), rpc);
             let utxos = wallet.list_utxos()?;
@@ -222,8 +232,8 @@ async fn main() -> Result<()> {
                 path: spend_path,
             };
 
-            let built = if via_agent || spend_path == SpendPath::Recovery {
-                spend_via_agent_or_local(&cfg, network, &state, &utxos, &req, via_agent).await?
+            let built = if spend_path == SpendPath::Recovery {
+                spend_local_recovery(&cfg, network, &state, &utxos, &req)?
             } else {
                 let primary = load_key(&cfg.vault.keys_dir, KeyRole::Primary)?;
                 let override_key = load_key(&cfg.vault.keys_dir, KeyRole::Override)?;
@@ -233,19 +243,21 @@ async fn main() -> Result<()> {
                     &[primary, override_key],
                 )?
             };
+            let tx = validate_built_spend(&built, &state.vault, network, &utxos, &req)?;
 
             println!("txid:   {}", built.txid);
             println!("path:   {:?}", built.path);
             println!("fee:    {} sats", built.fee_sats);
             println!("change: {} sats", built.change_sats);
-            println!("tx:     {}", built.tx_hex);
+            if show_transaction {
+                println!("tx:     {}", built.tx_hex);
+            } else {
+                println!("tx:     [hidden; pass --show-transaction to print signed hex]");
+            }
 
             if do_broadcast {
-                if built.needs_agent {
-                    bail!("transaction still needs agent signature; not broadcasting");
-                }
                 let rpc = BitcoinRpc::connect(&cfg.bitcoin)?;
-                let txid = broadcast(rpc.client(), &built.tx_hex)?;
+                let txid = broadcast(rpc.client(), &tx)?;
                 println!("broadcast: {txid}");
             }
         }
@@ -253,24 +265,30 @@ async fn main() -> Result<()> {
     Ok(())
 }
 
-async fn spend_via_agent_or_local(
+fn ensure_network_agent_disabled(via_agent: bool) -> Result<()> {
+    if via_agent {
+        bail!(
+            "--via-agent is disabled: the legacy HTTP flow exposed primary key material; \
+             use local regtest/testnet recovery until a reviewed PSBT-only protocol ships"
+        );
+    }
+    Ok(())
+}
+
+fn load_state(cfg: &Config, network: Network) -> Result<VaultState> {
+    let state = VaultState::load(&cfg.vault.state_path)?;
+    state.vault.require_network(network)?;
+    Ok(state)
+}
+
+fn spend_local_recovery(
     cfg: &Config,
     network: Network,
     state: &VaultState,
     utxos: &[tesaurus::wallet::VaultUtxo],
     req: &SpendRequest,
-    via_agent: bool,
 ) -> Result<tesaurus::spend::BuiltSpend> {
-    if via_agent {
-        let agent_url = cfg
-            .daemon
-            .agent_url
-            .clone()
-            .unwrap_or_else(|| format!("http://{}", cfg.agent.bind));
-        return request_agent_sign(cfg, &agent_url, state, utxos, req).await;
-    }
-
-    // Local recovery: primary + agent keys on this machine
+    // Research-only local recovery: both required keys stay in this process.
     let primary = load_key(&cfg.vault.keys_dir, KeyRole::Primary)?;
     let agent = load_key(&cfg.vault.keys_dir, KeyRole::Agent)?;
     Ok(SpendBuilder::new(&state.vault, network).build_and_sign(
@@ -283,55 +301,67 @@ async fn spend_via_agent_or_local(
     )?)
 }
 
-async fn request_agent_sign(
-    cfg: &Config,
-    agent_url: &str,
-    state: &VaultState,
-    utxos: &[tesaurus::wallet::VaultUtxo],
-    req: &SpendRequest,
-) -> Result<tesaurus::spend::BuiltSpend> {
-    let primary = load_key(&cfg.vault.keys_dir, KeyRole::Primary)?;
-    let body = serde_json::json!({
-        "vault": state.vault,
-        "spend": {
-            "destination": req.destination,
-            "amount_sats": req.amount_sats,
-            "fee_sats": req.fee_sats,
-            "path": "recovery",
-        },
-        "primary_wif": primary.wif(),
-        "utxos": utxos.iter().map(|u| serde_json::json!({
-            "txid": u.outpoint.txid.to_string(),
-            "vout": u.outpoint.vout,
-            "amount_sats": u.txout.value.to_sat(),
-            "confirmations": u.confirmations,
-        })).collect::<Vec<_>>(),
-    });
-
-    let url = format!("{}/v1/sign", agent_url.trim_end_matches('/'));
-    info!("requesting agent co-sign at {url}");
-
-    let mut req_builder = reqwest::Client::new().post(&url).json(&body);
-    if let Some(token) = &cfg.agent.api_token {
-        req_builder = req_builder.header("authorization", format!("Bearer {token}"));
+fn write_private_file(path: &std::path::Path, contents: &str, overwrite: bool) -> Result<()> {
+    if path.exists() && !overwrite {
+        bail!("{} exists (pass --force to overwrite)", path.display());
     }
-    let resp = req_builder.send().await.context("agent HTTP request")?;
-    if !resp.status().is_success() {
-        let status = resp.status();
-        let text = resp.text().await.unwrap_or_default();
-        bail!("agent rejected co-sign ({status}): {text}");
+    if let Ok(metadata) = std::fs::symlink_metadata(path) {
+        if metadata.file_type().is_symlink() {
+            bail!(
+                "refusing to write configuration through symlink {}",
+                path.display()
+            );
+        }
     }
-    let signed: tesaurus::agent::SignResponse = resp.json().await.context("agent response")?;
-    let total_in: u64 = utxos.iter().map(|u| u.txout.value.to_sat()).sum();
-    let change_sats = total_in.saturating_sub(req.amount_sats + signed.fee_sats);
-    Ok(tesaurus::spend::BuiltSpend {
-        tx_hex: signed.tx_hex,
-        txid: signed.txid,
-        path: SpendPath::Recovery,
-        fee_sats: signed.fee_sats,
-        amount_sats: req.amount_sats,
-        change_sats,
-        needs_agent: false,
-        psbt_incomplete_hex: None,
-    })
+    if let Some(parent) = path.parent() {
+        std::fs::create_dir_all(parent)?;
+    }
+
+    #[cfg(unix)]
+    {
+        use std::io::Write;
+        use std::os::unix::fs::{OpenOptionsExt, PermissionsExt};
+
+        let mut options = std::fs::OpenOptions::new();
+        options.write(true).mode(0o600);
+        if overwrite {
+            options.create(true).truncate(true);
+        } else {
+            options.create_new(true);
+        }
+        let mut file = options.open(path)?;
+        std::fs::set_permissions(path, std::fs::Permissions::from_mode(0o600))?;
+        file.write_all(contents.as_bytes())?;
+        file.sync_all()?;
+    }
+
+    #[cfg(not(unix))]
+    {
+        if overwrite {
+            std::fs::write(path, contents)?;
+        } else {
+            use std::io::Write;
+            let mut file = std::fs::OpenOptions::new()
+                .write(true)
+                .create_new(true)
+                .open(path)?;
+            file.write_all(contents.as_bytes())?;
+            file.sync_all()?;
+        }
+    }
+
+    Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn network_agent_is_fail_closed() {
+        ensure_network_agent_disabled(false).unwrap();
+        let err = ensure_network_agent_disabled(true).unwrap_err().to_string();
+        assert!(err.contains("--via-agent is disabled"));
+        assert!(err.contains("PSBT-only"));
+    }
 }
