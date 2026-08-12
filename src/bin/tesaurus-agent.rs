@@ -1,4 +1,5 @@
 //! Disabled network co-signer placeholder.
+//! Production PSBT-only design: docs/PSBT_AGENT_PROTOCOL.md (not unlocked here).
 
 use anyhow::{bail, Result};
 use clap::Parser;
