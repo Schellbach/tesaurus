@@ -8,7 +8,7 @@ Tesaurus from research containment toward a production custody path. It does
 Those remain fail-closed until later gates land with reviewed code and Security
 CI.
 
-Companion design (gate 1, design-accepted for implementation):
+Companion design (gate 1, design accepted for implementation):
 [`PSBT_AGENT_PROTOCOL.md`](PSBT_AGENT_PROTOCOL.md).
 
 ---
@@ -107,7 +107,7 @@ or fees without recomputation from the PSBT and Core B.
 **Eclipse / chain-oracle abuse** is in scope: an adversary who partitions the
 agent from honest peers and feeds a false chain must still fail the wall-clock
 bound (`WALL_CLOCK_SECONDS_PER_BLOCK = 600`) with `csv_blocks + safety_margin`
-before the agent accepts recovery maturity.
+before the agent accepts recovery maturity (~37 days intentional).
 
 ---
 
@@ -118,7 +118,7 @@ before the agent accepts recovery maturity.
 3. Agent private key (hot, pin-bound)
 4. Vault UTXOs and change
 5. Agent authentication secret / request credentials
-6. Durable replay database
+6. Durable replay database (vault-lifetime retention)
 7. Bitcoin Core cookies / RPC access (A and B)
 8. Descriptor / `AgentPin` integrity
 9. Operational procedures and named override identity
@@ -170,7 +170,8 @@ HTTP signer, `--via-agent` fail-closed).
 11. **Large external confirm (D1).** External value ≥ **5,000,000 sats**
     requires a valid override-key `confirm_token` before the agent signs.
 12. **Durable replay protection (D4).** Auth requests / PSBT identities cannot
-    be replayed across agent restarts within the retention window.
+    be replayed across agent restarts; replay records are retained for the
+    **vault lifetime**.
 13. **Fee-bump policy (D5).** Replace-by-fee / fee-bump paths re-run full
     policy validation; bumps are not a bypass for amounts, velocity, confirm,
     CSV, or structure checks.
@@ -211,6 +212,7 @@ consensus guarantees.
 | Sighash | **SIGHASH_ALL** on every input | Locked |
 | `nLockTime` | **0** | Locked for agent-path PSBTs |
 | Outputs | Single external + exact vault change | Locked shape |
+| Replay retention | **Vault lifetime** | D4; see protocol §15.2 |
 
 ---
 
@@ -242,7 +244,7 @@ Before any mainnet configuration unlock:
 - [ ] Core A and Core B independently deployed and monitored (eclipse alerts)
 - [ ] Wall-clock bound validated in staging (`safety_margin = 1008`)
 - [ ] Velocity and confirm_token paths exercised on testnet/signet
-- [ ] Durable replay store backup/restore tested (D4)
+- [ ] Durable replay store backup/restore tested (D4; vault-lifetime retention)
 - [ ] Fee-bump policy tested (D5)
 - [ ] Gate 1 implementation + Security CI matrix green and reviewed
 - [ ] Independent review / audit of signing and policy code

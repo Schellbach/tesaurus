@@ -1,11 +1,12 @@
 # Tesaurus PSBT-only agent protocol
 
 **Status:** gate 1 design **ACCEPTED for implementation** (Aldo 2026-08-11;
-D1–D5 closed).
+D1–D5 closed). No `--via-agent` unlock until implementation + Security CI
+matrix are green and reviewed.
 
 **Hard rule:** Do **not** unlock `--via-agent` and do **not** restore HTTP
-co-signing until implementation **and** the Security CI matrix in §10 are green
-and reviewed. Until then, `tesaurus-agent` and `--via-agent` remain fail-closed.
+co-signing until that condition is met. Until then, `tesaurus-agent` and
+`--via-agent` remain fail-closed.
 
 Threat model (gate 0 ACCEPTED): [`THREAT_MODEL.md`](THREAT_MODEL.md).
 
@@ -50,6 +51,7 @@ Threat model (gate 0 ACCEPTED): [`THREAT_MODEL.md`](THREAT_MODEL.md).
 | `nLockTime` | `0` |
 | Output shape | exactly one external output + exact vault change (omit change if dust/none per policy) |
 | Nodes | Core A (coordinator), Core B (agent) |
+| Replay retention (D4) | Vault lifetime |
 
 ---
 
@@ -74,6 +76,7 @@ At first start (or provision), the agent persists an `AgentPin`:
 ```text
 AgentPin {
   network,                 // research nets until mainnet checklist
+  genesis_hash,            // 32-byte chain genesis (confirm binding)
   descriptor,              // canonical wsh(thresh(...)) string
   csv_blocks,              // must equal 4320 for production pins
   primary_pubkey,
@@ -92,25 +95,25 @@ the pin is an explicit re-provision ceremony, not a per-request field.
 
 ---
 
-## 6. Transport API
+## 5b. Transport API
 
 Local, authenticated request/response (Unix socket or loopback TCP with mutual
 auth — exact binding chosen at implementation; **not** the legacy HTTP WIF
 protocol).
 
-### 6.0 Request
+### Request
 
 ```text
 SignRequest {
-  request_id:        opaque unique id (replay key material)
-  psbt:              base64 PSBT v0
-  auth:              MAC or signature over canonical request bytes
-  confirm_token:     optional CompactSize-tagged bytes (see §9 / §15)
+  request_id:            UUID v4 (16 bytes raw in confirm preimage)
+  psbt:                  base64 PSBT v0
+  auth:                  MAC or signature over canonical request bytes
+  confirm_token:         optional 64-byte compact ECDSA (see §9 / §15.1)
   claimed_external_sats: u64   // must match policy-computed external
 }
 ```
 
-### 6.1 Response
+### Response
 
 ```text
 SignResponse::Ok { psbt }           // same tx, agent partial sig added
@@ -124,23 +127,23 @@ Stable reject codes include: `AUTH`, `REPLAY`, `PSBT_MALFORMED`,
 
 ---
 
-## 7. Validation state machine (§6)
+## 6. Validation state machine (normative order)
 
-Every `SignRequest` runs these stages **in order**. Failure aborts with no
-signature and does not advance velocity counters except where noted for durable
-replay insertion.
+Every `SignRequest` runs these stages **in this exact order**. Failure aborts
+with no signature. Replay insertion (D4) occurs before signing as specified.
 
 ### 6.1 Authentication & durable replay (D4)
 
-1. Verify `auth` over the canonical request encoding.
+1. Verify `auth` over the canonical request encoding → else `AUTH`.
 2. Compute `replay_id = SHA256(request_id || psbt_txid || psbt_content_hash)`.
 3. If `replay_id` exists in the durable store → `REPLAY`.
 4. Insert `replay_id` **before** signing (fail closed if insert fails).
-5. Retention: see §15.2.
+5. Retention: **vault lifetime** (see §15.2). Do not prune on a timer while the
+   vault pin remains active.
 
 ### 6.2 PSBT structure
 
-1. Parse PSBT **v0** only.
+1. Parse PSBT **v0** only → else `PSBT_MALFORMED`.
 2. `nLockTime == 0` else `LOCKTIME`.
 3. Every input sighash type present and equal to `SIGHASH_ALL` else `SIGHASH`.
 4. Output count: one external + optional single change; no other shapes.
@@ -151,7 +154,8 @@ replay insertion.
 
 1. Each input must include witness UTXO (or full prior tx per implementation
    choice locked in code review) sufficient to verify amounts and scripts.
-2. Redeem/witness script for each vault input must match the pinned descriptor.
+2. Redeem/witness script for each vault input must match the pinned descriptor
+   → else `PIN_MISMATCH`.
 
 ### 6.3b Foreign inputs (D3) → `FOREIGN_INPUT`
 
@@ -183,13 +187,13 @@ For every vault input:
 
 1. Query Core B for confirmations / coin age relevant to `older(csv_blocks)`.
 2. Require CSV mature: confirmations ≥ `csv_blocks` (4320) per input being
-   spent under the agent branch.
+   spent under the agent branch → else `CSV_IMMATURE`.
 3. Wall-clock: require local trustworthy time such that elapsed bound covers
    `(csv_blocks + safety_margin) * WALL_CLOCK_SECONDS_PER_BLOCK`
    since the earliest admissible birth time derived from Core B headers /
    block times for those coins (implementation uses the conservative
    interpretation reviewed in gate 2). Intentional ~37 day bound.
-4. Failures → `CSV_IMMATURE` or `WALL_CLOCK`.
+4. Failures of the wall-clock bound → `WALL_CLOCK`.
 
 ### 6.5 Amounts
 
@@ -211,11 +215,11 @@ For every vault input:
 If `E ≥ 5_000_000`:
 
 1. `confirm_token` must be present else `CONFIRM_REQUIRED`.
-2. Verify per §9 / §15 against the **override** pubkey in the pin else
+2. Verify per §9 / §15.1 against the **override** pubkey in the pin else
    `CONFIRM_INVALID`.
-3. If `E < 5_000_000`, `confirm_token` must be absent or is ignored
-   (implementation picks one; CI locks **external-only** enforcement — see
-   §15.3).
+
+If `E < 5_000_000`, confirm is **not** required. Threshold keys off
+**external-only** `E` (never `E+C`). See §15.3 CI cases.
 
 ### 6.7 Sign
 
@@ -224,7 +228,7 @@ If `E ≥ 5_000_000`:
 
 ---
 
-## 8. Coordinator flow
+## 7. Coordinator flow
 
 ```text
 1. Owner builds spend intent (external address, amount).
@@ -233,7 +237,7 @@ If `E ≥ 5_000_000`:
 3. If primary path: collect primary HW + override signatures; broadcast via A.
 4. If agent recovery path (after maturity):
    a. Optionally collect primary partial sig first (typical 2-of-3).
-   b. If E ≥ 5M: obtain confirm_token from override holder (§9).
+   b. If E ≥ 5M: obtain confirm_token from override holder (§9 / §15.1).
    c. Send SignRequest to owner-operated agent.
    d. Agent runs §6 against Core B; returns PSBT or reject.
    e. Finalize and broadcast via Core A.
@@ -242,11 +246,12 @@ If `E ≥ 5_000_000`:
 
 ---
 
-## 9. Fee-bump policy (D5)
+## 8. Fee-bump policy (D5)
 
 Fee-bumps / RBF replacements are **not** a privileged path.
 
-1. Replacement PSBT must pass the **entire** §6 state machine.
+1. Replacement PSBT must pass the **entire** §6 state machine in normative
+   order.
 2. External destination script and external amount `E` must be identical to the
    replaced intent (fee may rise by reducing change only, or by approved
    pattern locked in implementation tests).
@@ -255,16 +260,16 @@ Fee-bumps / RBF replacements are **not** a privileged path.
    rejected unless they pass velocity as a new `E` (production default:
    **forbid external increases** on bumps).
 4. Confirm token: if `E ≥ 5M`, bump requests need a valid `confirm_token`
-   binding the bump’s preimage fields (§15), not a reused token from a
-   different `psbt_content_hash`.
+   whose preimage binds this request’s `request_id` (uuid16) and txid
+   (§15.1), not a reused token from a different binding.
 5. Replay: new `request_id` / content hash required; old ids remain
-   non-replayable.
+   non-replayable for the vault lifetime.
 
 Violations → `FEE_BUMP_DENIED` or the underlying stage code.
 
 ---
 
-## 10. Confirm attestation (§9)
+## 9. Confirm attestation
 
 `confirm_token` proves the **override** key authorized a specific large
 external spend.
@@ -276,24 +281,19 @@ external spend.
 - Verifying key: pin `override_pubkey`.
 - Required iff policy-computed external `E ≥ 5_000_000` sats (D1).
 
-### Preimage
+### Preimage (normative)
 
-Canonical byte layout is locked in **§15.1**. High-level fields:
+Canonical byte layout is locked in **§15.1**:
 
-- domain tag
-- network
-- descriptor hash
-- external script pubkey
-- external amount `E`
-- change amount `C` (0 if none)
-- PSBT txid / content binding
-- CSV / pin version fields as specified in §15
+```text
+TESAURUS_CONFIRM_V1 || u8(1) || uuid16 || txid32 || u64_be(amount) || genesis32
+```
 
 The agent verifies the signature; it does not possess the override private key.
 
 ---
 
-## 11. Security CI matrix (§10)
+## 10. Security CI matrix
 
 Gate 3 lands these as automated fail-closed checks. Design acceptance requires
 the matrix to exist as a specification now; documentation-only PRs must not
@@ -310,24 +310,27 @@ weaken current containment CI.
 | CI-07 | Unit: wall-clock short | `WALL_CLOCK` |
 | CI-08 | Unit: velocity per sig | Reject `E > 10M` |
 | CI-09 | Unit: velocity 144-block window | Reject cumulative `> 50M` |
-| CI-10 | Unit: confirm missing at 5M | `CONFIRM_REQUIRED` |
+| CI-10 | Unit: confirm missing at 5M external | `CONFIRM_REQUIRED` |
 | CI-11 | Unit: confirm invalid sig | `CONFIRM_INVALID` |
-| CI-12 | Unit: confirm not required below 5M | Signs without token (external-only rule) |
+| CI-12 | Unit: confirm not required below 5M external | Signs without token |
 | CI-13 | Unit: sighash ≠ ALL | `SIGHASH` |
 | CI-14 | Unit: locktime ≠ 0 | `LOCKTIME` |
-| CI-15 | Unit: durable replay (D4) | Second identical request `REPLAY` after restart |
+| CI-15 | Unit: durable replay (D4) | Second identical request `REPLAY` after restart; vault-lifetime retention |
 | CI-16 | Unit: fee-bump full policy (D5) | Bump without full checks denied; honest bump ok |
 | CI-17 | Property: amount conservation | No signed PSBT with negative fee / diverted change |
 | CI-18 | Dual-node regtest | Core B disagreement with poisoned metadata → reject |
 | CI-19 | No WIF in transport fixtures | Grep / type-level transport excludes secrets |
 | CI-20 | Container surface | Image does not expose agent listener by default |
+| CI-21 | Confirm threshold external-only (§15.3) | Cases in §15.3 table; `E+C` must not drive threshold |
+| CI-22 | Confirm preimage encoding (§15.1) | Vectors for `TESAURUS_CONFIRM_V1\|\|u8(1)\|\|uuid16\|\|txid32\|\|u64_be\|\|genesis32` |
+| CI-23 | Normative §6 stage order | Mutating earlier-stage failures never reach later stages / signing |
 
 Current repo Security CI already covers CI-01..CI-03 style containment. CI-04+
 arrive with implementation.
 
 ---
 
-## 12. Property tests
+## 11. Property tests
 
 Minimum property suite (gate 3):
 
@@ -335,21 +338,25 @@ Minimum property suite (gate 3):
 2. **Change integrity:** change script equals pin vault script.
 3. **External uniqueness:** exactly one non-change output.
 4. **Pin closure:** mutating any pin field fails open requests.
-5. **Replay:** random valid request succeeds once; identical replay_id fails.
-6. **Confirm binding:** flipping any preimage field invalidates `confirm_token`.
+5. **Replay:** random valid request succeeds once; identical replay_id fails
+   across restart (vault-lifetime store).
+6. **Confirm binding:** flipping any §15.1 preimage field invalidates
+   `confirm_token`.
 7. **Velocity monotonicity:** externals accumulate in-window until expiry by
    height.
+8. **Stage order:** inject faults per §6 stage; observe first matching reject
+   code only.
 
 ---
 
-## 13. Locked choices (§12)
+## 12. Locked choices
 
 | Topic | Choice |
 |---|---|
-| D1 Confirm | Agent-enforced at ≥5M external; override ECDSA compact64 |
+| D1 Confirm | Agent-enforced at ≥5M **external**; override ECDSA compact64 over SHA256(preimage) |
 | D2 Path | `NOT_RECOVERY_PATH` reject codes for non-agent-branch misuse |
 | D3 Inputs | `FOREIGN_INPUT` — vault-only, Core B verified |
-| D4 Replay | Durable store; insert-before-sign; retention §15.2 |
+| D4 Replay | Durable store; insert-before-sign; **vault-lifetime** retention |
 | D5 Fee-bump | Full policy re-validation; no external increase by default |
 | PSBT | v0 only |
 | Sighash | ALL |
@@ -357,19 +364,20 @@ Minimum property suite (gate 3):
 | Hosting | Owner-operated agent |
 | Dual node | Core A build/broadcast; Core B verify |
 | Crate split | `tesaurus-policy` / `tesaurus-agent` / `tesaurus` |
+| Confirm preimage | §15.1 exact layout |
 
 Aldo closed D1–D5 on 2026-08-11 as part of design acceptance.
 
 ---
 
-## 14. Acceptance checklist (implementation PR)
+## 13. Acceptance checklist (implementation PR)
 
-- [ ] `tesaurus-policy` encodes §6 with stable error codes
+- [ ] `tesaurus-policy` encodes §6 with stable error codes in normative order
 - [ ] Agent loads pin + agent key only; cannot read primary/override paths
 - [ ] Core B CSV + wall-clock enforced with locked constants
 - [ ] D1–D5 tests green (`confirm`, `NOT_RECOVERY_PATH`, `FOREIGN_INPUT`,
-      replay restart, fee-bump)
-- [ ] §10 CI matrix jobs added and green
+      replay restart + vault-lifetime retention, fee-bump)
+- [ ] §10 CI matrix jobs added and green (including CI-21..CI-23)
 - [ ] Property tests in §11 green
 - [ ] No WIF/HTTP legacy types restored
 - [ ] `--via-agent` still fail-closed **or** unlocked only behind explicit
@@ -379,63 +387,75 @@ Aldo closed D1–D5 on 2026-08-11 as part of design acceptance.
 
 ---
 
+## 14. Decisions closed (D1–D5)
+
+| ID | Decision | Locked rule |
+|---|---|---|
+| **D1** | Large external confirm | Agent enforces `confirm_token` when external `E ≥ 5_000_000`; override key; §15.1 encoding |
+| **D2** | Recovery path misuse | Reject with `NOT_RECOVERY_PATH` |
+| **D3** | Non-vault inputs | Reject with `FOREIGN_INPUT`; Core B must see each UTXO |
+| **D4** | Replay | Durable insert-before-sign; retain for **vault lifetime** |
+| **D5** | Fee-bump | Re-run full §6 policy; no external-amount increase by default |
+
+---
+
 ## 15. Protocol polish
 
 ### 15.1 `confirm_token` encoding
 
-**Token:** 64-byte compact ECDSA signature
-`sig[0..32] || sig[32..64]` (r || s), no sighash byte suffix.
+**Token:** 64-byte compact ECDSA signature `r \|\| s` (no sighash byte).
 
 **Message:** `SHA256(preimage)`.
 
-**Preimage layout** (big-endian integers, length-prefixed byte strings as
-`u32_be length || bytes`):
+**Preimage layout** (concatenation, no length prefixes except as shown):
 
 ```text
 preimage =
-  "TESAURUS_CONFIRM_V1" ||          # 18 bytes ASCII domain
-  u8  network_id ||                 # 0=regtest, 1=testnet, 2=signet, 3=bitcoin
-  u8  csv_version ||                # must be 1 for this document
-  hash32 descriptor_sha256 ||       # SHA256(canonical descriptor UTF-8)
-  u32_be pk_script_len || pk_script ||   # external output scriptPubKey
-  u64_be external_sats ||           # E
-  u64_be change_sats ||             # C or 0
-  hash32 psbt_txid ||               # bitcoin txid byte order locked in tests
-  hash32 psbt_content_hash ||       # SHA256(raw PSBT bytes as received)
-  u32_be csv_blocks ||              # 4320
-  u32_be safety_margin              # 1008
+    "TESAURUS_CONFIRM_V1"   # 18 bytes ASCII domain separator
+ || u8(1)                   # encoding version = 1
+ || uuid16                  # request_id as 16 raw UUID bytes
+ || txid32                  # transaction id, Bitcoin display/RPC byte order
+ || u64_be(amount)          # external amount E, big-endian u64 sats
+ || genesis32               # chain genesis block hash (32 bytes, pin.genesis_hash)
 ```
 
-Verification:
+Verification (agent):
 
-1. Reconstruct preimage from PSBT + pin (ignore client-supplied amounts except
-   as already equal under §6.5).
+1. Reconstruct `preimage` from `SignRequest.request_id`, the PSBT’s txid
+   (display order), policy-computed external `E`, and `AgentPin.genesis_hash`.
 2. `msg = SHA256(preimage)`.
-3. ECDSA verify compact64 with `override_pubkey`.
+3. ECDSA-verify compact64 with pin `override_pubkey`.
+4. Mismatch or bad sig → `CONFIRM_INVALID`.
+
+Test vectors in CI-22 must cover: version byte ≠ 1, flipped uuid byte, wrong
+txid endianness, wrong amount, wrong genesis, and a known-valid compact64.
 
 ### 15.2 Replay retention (D4)
 
-- Store: append-only or KV with crash-safe sync (e.g. SQLite WAL or similar).
+- Store: crash-safe durable KV or SQLite WAL (or equivalent).
 - Key: `replay_id` from §6.1.
-- Value: `{ created_at, tip_height_at_sign, external_sats }`.
-- Retain entries for at least **2016 blocks** of Core B tip growth **or** 30
-  days wall-clock, whichever is longer.
-- Prune only after both thresholds; never prune on read path if prune fails.
+- Value: `{ created_at, tip_height_at_sign, external_sats, request_id }`.
+- **Retention: vault lifetime.** While the current `AgentPin` / vault remains
+  provisioned, do **not** time-prune replay records. Clearing the store is an
+  explicit re-provision / vault-rotation ceremony, not a background job.
 - Backup/restore of the replay DB is an operational requirement before mainnet.
+- After pin rotation, old replay DBs must not be reused against a new pin
+  without review (fail closed preferred).
 
 ### 15.3 External-only confirm threshold CI
 
-CI must lock that confirm enforcement keys off **external** value `E` only:
+CI-21 must lock that confirm enforcement keys off **external** value `E` only:
 
 | External `E` | Change `C` | Token |
 |---|---|---|
-| `4_999_999` | large | not required |
-| `5_000_000` | 0 | required |
-| `5_000_000` | large | required |
-| `10_000_000` | any | required + velocity per-sig boundary |
+| `4_999_999` | `0` | not required |
+| `4_999_999` | `50_000_000` | not required (`E+C` must not trigger) |
+| `5_000_000` | `0` | required |
+| `5_000_000` | `50_000_000` | required |
+| `10_000_000` | any | required + at per-sig velocity boundary |
 
-A test that only sums `E+C` for the threshold is a **failing** test relative to
-this design.
+A test or implementation that uses `E+C` (or input total) for the confirm
+threshold is a **design violation**.
 
 ---
 
@@ -443,6 +463,5 @@ this design.
 
 | Field | Value |
 |---|---|
-| Status | Gate 1 design **ACCEPTED for implementation** (Aldo 2026-08-11; D1–D5 closed) |
-| Unlock | **No** `--via-agent` until implementation + Security CI matrix green and reviewed |
+| Status | Gate 1 design **ACCEPTED for implementation** (Aldo 2026-08-11; D1–D5 closed). No `--via-agent` unlock until implementation + Security CI matrix are green and reviewed |
 | Companion | `docs/THREAT_MODEL.md` (gate 0 ACCEPTED 2026-08-11) |
