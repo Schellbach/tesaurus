@@ -1,8 +1,12 @@
 //! Disabled network co-signer placeholder.
 //! Production PSBT-only design: docs/PSBT_AGENT_PROTOCOL.md (not unlocked here).
+//!
+//! The agent library can assemble a Core B `ChainView`; this binary still exits
+//! non-zero and does not listen or sign.
 
 use anyhow::{bail, Result};
 use clap::Parser;
+use tesaurus_agent::disabled_message;
 
 #[derive(Parser, Debug)]
 #[command(
@@ -15,11 +19,6 @@ struct Cli {}
 fn main() -> Result<()> {
     let _ = Cli::parse();
     bail!("{}", disabled_message())
-}
-
-fn disabled_message() -> &'static str {
-    "tesaurus-agent is disabled: the legacy HTTP protocol could expose primary key material; \
-     use only local regtest/testnet signing until a reviewed PSBT-only protocol ships"
 }
 
 #[cfg(test)]
@@ -50,6 +49,31 @@ mod tests {
         let root = Path::new(env!("CARGO_MANIFEST_DIR"));
         let needles = ["primary", "override"].map(|role| format!("{role}.{}", "wif"));
         walk_assert_no_needles(root, &needles);
+    }
+
+    #[test]
+    fn agent_manifest_does_not_depend_on_coordinator_crate() {
+        let manifest = Path::new(env!("CARGO_MANIFEST_DIR")).join("Cargo.toml");
+        let text = fs::read_to_string(manifest).expect("read Cargo.toml");
+        assert!(
+            !text.lines().any(line_declares_tesaurus_dep),
+            "tesaurus-agent must not depend on the tesaurus WIF-loading crate"
+        );
+        assert!(
+            line_declares_tesaurus_dep(r#"tesaurus = { path = "../tesaurus" }"#),
+            "isolation needle must catch space-before-equals coordinator dep"
+        );
+        assert!(!line_declares_tesaurus_dep(
+            r#"tesaurus-policy = { path = "../tesaurus-policy" }"#
+        ));
+    }
+
+    fn line_declares_tesaurus_dep(line: &str) -> bool {
+        let rest = match line.trim_start().strip_prefix("tesaurus") {
+            Some(rest) => rest,
+            None => return false,
+        };
+        rest.trim_start().starts_with('=')
     }
 
     fn walk_assert_no_needles(path: &Path, needles: &[String; 2]) {

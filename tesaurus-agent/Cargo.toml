@@ -9,16 +9,25 @@ repository.workspace = true
 rust-version.workspace = true
 publish = false
 
+[lib]
+path = "src/lib.rs"
+
 [[bin]]
 name = "tesaurus-agent"
 path = "src/main.rs"
 
 [dependencies]
 anyhow.workspace = true
+bitcoin.workspace = true
+bitcoincore-rpc.workspace = true
 clap.workspace = true
+tesaurus-policy = { path = "../tesaurus-policy", features = ["agent-tcb"] }
+thiserror.workspace = true
 
 [dev-dependencies]
-tesaurus-policy = { path = "../tesaurus-policy" }
+tempfile.workspace = true
+# agent-test-harness bypasses AUTH; never enable it under [dependencies].
+tesaurus-policy = { path = "../tesaurus-policy", features = ["agent-tcb", "agent-test-harness"] }
 
 [lints]
 workspace = true

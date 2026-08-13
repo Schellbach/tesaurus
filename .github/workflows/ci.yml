@@ -55,10 +55,78 @@ jobs:
             echo "policy/agent crates must not mention coordinator WIF filenames"
             exit 1
           fi
-          if grep -E '^tesaurus[[:space:]]*=' tesaurus-agent/Cargo.toml; then
+          if grep -E '^\s*tesaurus\s*=' tesaurus-agent/Cargo.toml; then
             echo "tesaurus-agent must not depend on the tesaurus WIF-loading crate"
             exit 1
           fi
+          # from_agent_tcb is a dumb public assembler; callers are TCB until
+          # this call-site lock exists. Not a type-system seal. Scan the
+          # workspace root (not only policy/agent) so a coordinator or new
+          # crate cannot call the assembler unnoticed.
+          view_hits="$(grep -R -n --include='*.rs' --exclude-dir=target --exclude-dir=.git \
+            -E 'from_agent_tcb([^_A-Za-z0-9]|$)' . || true)"
+          if [ -z "$view_hits" ]; then
+            echo "from_agent_tcb must be defined in tesaurus-policy/src/facts.rs"
+            exit 1
+          fi
+          view_bad="$(printf '%s\n' "$view_hits" \
+            | grep -vE 'tesaurus-policy/src/facts.rs:|tesaurus-agent/src/chain.rs:' || true)"
+          if [ -n "$view_bad" ]; then
+            echo "from_agent_tcb must be defined only in tesaurus-policy/src/facts.rs and called only from tesaurus-agent/src/chain.rs"
+            echo "$view_bad"
+            exit 1
+          fi
+          echo "$view_hits" | grep -q 'tesaurus-policy/src/facts.rs:'
+          echo "$view_hits" | grep -q 'tesaurus-agent/src/chain.rs:'
+          auth_hits="$(grep -R -n --include='*.rs' --exclude-dir=target --exclude-dir=.git \
+            -F 'from_agent_tcb_mac_unspecified' . || true)"
+          if [ -z "$auth_hits" ]; then
+            echo "from_agent_tcb_mac_unspecified must be defined in tesaurus-policy/src/facts.rs"
+            exit 1
+          fi
+          auth_bad="$(printf '%s\n' "$auth_hits" \
+            | grep -vE 'tesaurus-policy/src/facts.rs:|tesaurus-agent/src/auth.rs:' || true)"
+          if [ -n "$auth_bad" ]; then
+            echo "from_agent_tcb_mac_unspecified must be called only from tesaurus-agent/src/auth.rs"
+            echo "$auth_bad"
+            exit 1
+          fi
+          echo "$auth_hits" | grep -q 'tesaurus-policy/src/facts.rs:'
+          echo "$auth_hits" | grep -q 'tesaurus-agent/src/auth.rs:'
+          python3 - <<'PY'
+from pathlib import Path
+import re
+import sys
+
+def is_production_dependency_section(name: str) -> bool:
+    # [dependencies], [dependencies.foo], [workspace.dependencies],
+    # [target.'cfg(...)'.dependencies]. Not [dev-dependencies].
+    n = name.strip()
+    if "dev-dependencies" in n:
+        return False
+    return (
+        n == "dependencies"
+        or n.startswith("dependencies.")
+        or n.endswith("dependencies")
+    )
+
+bad = []
+for path in Path(".").rglob("Cargo.toml"):
+    if "target" in path.parts:
+        continue
+    section = None
+    for i, line in enumerate(path.read_text().splitlines(), 1):
+        m = re.match(r"^\[([^\]]+)\]\s*$", line)
+        if m:
+            section = m.group(1).strip()
+            continue
+        if section and is_production_dependency_section(section) and "agent-test-harness" in line:
+            bad.append(f"{path}:{i}: [{section}] {line}")
+if bad:
+    print("agent-test-harness must not appear under production dependency sections (AUTH bypass)")
+    print("\n".join(bad))
+    sys.exit(1)
+PY
       - name: Build release binaries
         run: cargo build --release --locked --bins
 

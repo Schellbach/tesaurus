@@ -50,8 +50,8 @@ Research caution above still applies. The accepted production planning docs are:
 
 `--via-agent` and `tesaurus-agent` remain fail-closed until that protocol is
 implemented, the Security CI matrix is green, and the unlock is reviewed.
-The `tesaurus-policy` workspace crate is in progress (confirm token, CSV /
-wall-clock, R1 replay); it does not unlock `--via-agent`.
+`tesaurus-policy` is pure validation; `tesaurus-agent` maps Core B RPC into
+`ChainView` facts. Neither unlocks `--via-agent` or signs.
 
 ## Working research surface
 

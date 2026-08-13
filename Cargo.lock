@@ -654,8 +654,12 @@ name = "tesaurus-agent"
 version = "0.2.0"
 dependencies = [
  "anyhow",
+ "bitcoin",
+ "bitcoincore-rpc",
  "clap",
+ "tempfile",
  "tesaurus-policy",
+ "thiserror",
 ]
 
 [[package]]
