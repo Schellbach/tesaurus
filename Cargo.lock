@@ -650,6 +650,27 @@ dependencies = [
 ]
 
 [[package]]
+name = "tesaurus-agent"
+version = "0.2.0"
+dependencies = [
+ "anyhow",
+ "clap",
+ "tesaurus-policy",
+]
+
+[[package]]
+name = "tesaurus-policy"
+version = "0.2.0"
+dependencies = [
+ "bitcoin",
+ "hex",
+ "serde",
+ "serde_json",
+ "tempfile",
+ "thiserror",
+]
+
+[[package]]
 name = "thiserror"
 version = "1.0.69"
 source = "registry+https://github.com/rust-lang/crates.io-index"
