@@ -39,6 +39,18 @@ PSBT-only protocol is designed and reviewed.
 These controls reduce accidental exposure; they do not make the software
 production-ready.
 
+## Production path
+
+Research caution above still applies. The accepted production planning docs are:
+
+- [docs/THREAT_MODEL.md](docs/THREAT_MODEL.md) — gate 0 ACCEPTED custody
+  architecture and invariants
+- [docs/PSBT_AGENT_PROTOCOL.md](docs/PSBT_AGENT_PROTOCOL.md) — gate 1 PSBT-only
+  agent protocol design ACCEPTED for implementation (D1–D5 closed)
+
+`--via-agent` and `tesaurus-agent` remain fail-closed until that protocol is
+implemented, the Security CI matrix is green, and the unlock is reviewed.
+
 ## Working research surface
 
 - Miniscript descriptor compilation and sanity checks
@@ -153,13 +165,17 @@ cargo clippy --locked --all-targets -- -D warnings
 cargo build --release --locked
 ```
 
-The next security-sensitive milestone is a PSBT-only signer that:
+The next security-sensitive milestone is implementing the accepted PSBT-only
+protocol in [docs/PSBT_AGENT_PROTOCOL.md](docs/PSBT_AGENT_PROTOCOL.md) so the
+agent:
 
 1. cannot read primary or override keys;
 2. pins one descriptor and network;
-3. verifies UTXOs and confirmations independently through Bitcoin Core;
+3. verifies UTXOs and confirmations independently through Bitcoin Core (Core B);
 4. verifies every input, output, amount, change script, sequence, and fee;
 5. returns only an additional partial signature.
+
+Until that lands with reviewed Security CI, `--via-agent` stays fail-closed.
 
 ## Security reporting
 
