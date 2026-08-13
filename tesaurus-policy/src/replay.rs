@@ -10,10 +10,12 @@
 //! 2. Same `request_id` + same `replay_id` → idempotent cached Ok (honest retry).
 //! 3. Same `request_id` + different `replay_id` → `REPLAY_CONFLICT`.
 //! 4. Same outpoints already signed with different outputs → `REPLAY`, except
-//!    a **D5 vault-change-only** mutation (external destination and amount
+//!    a **D5 vault-change-only** mutation: **identical outpoint sets** (same
+//!    inputs, not a superset/subset), external destination and amount
 //!    unchanged, vault change strictly decreased / fee increased, no new
-//!    external outputs). That shape is **not** `REPLAY`; full §8 policy still
-//!    runs when fee-bump signing is implemented.
+//!    external outputs. Adding or dropping inputs stays `REPLAY` until §8 is
+//!    wired with an explicit rule. Full §8 policy still runs when fee-bump
+//!    signing is implemented.
 
 use std::collections::HashSet;
 use std::fs::{self, File, OpenOptions};
@@ -69,6 +71,9 @@ pub struct ReplayRecord {
     /// Consensus outputs of the (to-be) signed transaction.
     pub outputs: Vec<TxOut>,
     /// Pinned vault script; used to classify change vs external for D5.
+    ///
+    /// Wiring invariant for later (not enforced at runtime in this crate):
+    /// this field MUST be copied from `AgentPin`, never taken from the request.
     pub vault_script: ScriptBuf,
     pub outputs_commitment: [u8; 32],
     pub signed_psbt_or_partial: Vec<u8>,
@@ -80,8 +85,9 @@ pub enum ReplayVerdict {
     Fresh,
     /// Honest retry: return the previously stored payload. Do not re-sign.
     Idempotent { signed_psbt_or_partial: Vec<u8> },
-    /// Same outpoints, vault-change-only (D5). Not `REPLAY`. Caller must still
-    /// run full §8 policy when fee-bump signing is wired; this crate does not sign.
+    /// Identical outpoint sets + vault-change-only (D5). Not `REPLAY`.
+    /// Adding or dropping inputs is still `REPLAY`. Caller must still run full
+    /// §8 policy when fee-bump signing is wired; this crate does not sign.
     FeeBump,
 }
 
@@ -252,6 +258,12 @@ fn outpoints_overlap(a: &[OutPoint], b: &[OutPoint]) -> bool {
     b.iter().any(|op| set.contains(op))
 }
 
+fn outpoints_identical(a: &[OutPoint], b: &[OutPoint]) -> bool {
+    let set_a: HashSet<_> = a.iter().copied().collect();
+    let set_b: HashSet<_> = b.iter().copied().collect();
+    !set_a.is_empty() && set_a == set_b
+}
+
 struct ClassifiedOutputs {
     external: TxOut,
     change_sats: u64,
@@ -276,9 +288,13 @@ fn classify_outputs(outputs: &[TxOut], vault_script: &ScriptBuf) -> Option<Class
     })
 }
 
-/// D5 carve-out: same external destination and amount, vault change strictly
-/// decreased (fee increased), no new external outputs.
+/// D5 carve-out: **identical outpoint sets**, same external destination and
+/// amount, vault change strictly decreased (fee increased), no new external
+/// outputs. A superset/subset of inputs is not a fee-bump.
 fn is_vault_change_only(previous: &ReplayRecord, candidate: &ReplayRecord) -> bool {
+    if !outpoints_identical(&previous.outpoints, &candidate.outpoints) {
+        return false;
+    }
     if previous.vault_script != candidate.vault_script {
         return false;
     }
@@ -486,7 +502,7 @@ mod tests {
     fn record_with_outputs(
         req: u8,
         replay: u8,
-        op: u32,
+        ops: &[u32],
         outputs: Vec<TxOut>,
         payload: &[u8],
     ) -> ReplayRecord {
@@ -501,7 +517,7 @@ mod tests {
             request_id,
             replay_id,
             psbt_txid,
-            outpoints: vec![outpoint(op)],
+            outpoints: ops.iter().copied().map(outpoint).collect(),
             outputs,
             vault_script: vault_script(),
             outputs_commitment,
@@ -514,7 +530,7 @@ mod tests {
         record_with_outputs(
             req,
             replay,
-            op,
+            &[op],
             vec![txout(external_sats, dest_script())],
             payload,
         )
@@ -523,6 +539,7 @@ mod tests {
     fn spend_with_change(
         req: u8,
         replay: u8,
+        ops: &[u32],
         external: u64,
         change: u64,
         payload: &[u8],
@@ -531,7 +548,7 @@ mod tests {
         if change > 0 {
             outputs.push(txout(change, vault_script()));
         }
-        record_with_outputs(req, replay, 7, outputs, payload)
+        record_with_outputs(req, replay, ops, outputs, payload)
     }
 
     #[test]
@@ -579,27 +596,53 @@ mod tests {
     }
 
     #[test]
-    fn d5_vault_change_only_is_not_outpoint_replay() {
+    fn d5_identical_outpoints_vault_change_only_is_feebump() {
         let tmp = tempfile::tempdir().unwrap();
         let mut store = ReplayStore::init(tmp.path()).unwrap();
         store
-            .commit(spend_with_change(1, 1, 50_000, 20_000, b"orig"))
+            .commit(spend_with_change(1, 1, &[7], 50_000, 20_000, b"orig"))
             .unwrap();
 
-        let bump = spend_with_change(2, 9, 50_000, 15_000, b"bump");
+        let bump = spend_with_change(2, 9, &[7], 50_000, 15_000, b"bump");
         assert_eq!(store.commit(bump).unwrap(), ReplayVerdict::FeeBump);
 
-        // Diverting the external amount is still REPLAY.
-        let diverted = spend_with_change(3, 3, 50_001, 14_999, b"divert");
+        let diverted = spend_with_change(3, 3, &[7], 50_001, 14_999, b"divert");
         assert_eq!(
             store.preflight(&diverted).unwrap_err().code,
             PolicyErrorCode::Replay
         );
 
-        // Increasing change is not a fee-bump.
-        let raised = spend_with_change(4, 4, 50_000, 21_000, b"up");
+        let raised = spend_with_change(4, 4, &[7], 50_000, 21_000, b"up");
         assert_eq!(
             store.preflight(&raised).unwrap_err().code,
+            PolicyErrorCode::Replay
+        );
+    }
+
+    #[test]
+    fn d5_added_vault_input_is_replay() {
+        let tmp = tempfile::tempdir().unwrap();
+        let mut store = ReplayStore::init(tmp.path()).unwrap();
+        store
+            .commit(spend_with_change(1, 1, &[7], 50_000, 20_000, b"orig"))
+            .unwrap();
+        let added = spend_with_change(2, 9, &[7, 8], 50_000, 15_000, b"extra-in");
+        assert_eq!(
+            store.preflight(&added).unwrap_err().code,
+            PolicyErrorCode::Replay
+        );
+    }
+
+    #[test]
+    fn d5_dropped_vault_input_is_replay() {
+        let tmp = tempfile::tempdir().unwrap();
+        let mut store = ReplayStore::init(tmp.path()).unwrap();
+        store
+            .commit(spend_with_change(1, 1, &[7, 8], 50_000, 20_000, b"orig"))
+            .unwrap();
+        let dropped = spend_with_change(2, 9, &[7], 50_000, 15_000, b"drop-in");
+        assert_eq!(
+            store.preflight(&dropped).unwrap_err().code,
             PolicyErrorCode::Replay
         );
     }
