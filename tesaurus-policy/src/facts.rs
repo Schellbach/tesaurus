@@ -15,10 +15,10 @@
 //! metadata through (`from_test_facts` is absent when this crate is a
 //! dependency).
 //!
-//! The `agent-tcb` feature (tesaurus-agent only) exposes a dumb assembler
-//! used after Core B RPC. It is also `cfg(not(test))`, so these unit tests
-//! cannot call it as a lying constructor even under workspace feature
-//! unification.
+//! The `agent-tcb` feature exposes a dumb public assembler used after Core B
+//! RPC. It is also `cfg(not(test))`, so these unit tests cannot call it even
+//! under workspace feature unification. That is not a TCB seal: callers who
+//! pass fabricated values are the TCB until the call-site lock exists.
 //!
 //! [`AgentAuth`] is not a `bool`. There is no production constructor that
 //! marks auth verified until the agent verifies a transport MAC locally.
@@ -116,7 +116,7 @@ impl ChainView {
     /// Test-only constructor. **May lie** about CSV, unspent, scripts, and time.
     ///
     /// Production must not use this. tesaurus-agent maps Core B RPC through
-    /// [`ChainView::from_agent_tcb`], never this function.
+    /// the agent-tcb assembler, never this function.
     #[cfg(test)]
     pub fn from_test_facts(
         genesis_hash: BlockHash,
@@ -132,9 +132,8 @@ impl ChainView {
         }
     }
 
-    /// Dumb assembler for tesaurus-agent after Core B RPC. Not `from_core_b`
-    /// and not available in this crate's tests. Callers who pass fabricated
-    /// values become the TCB — only tesaurus-agent should call this.
+    /// from_agent_tcb is a dumb public assembler; callers are TCB until the
+    /// call-site lock exists.
     #[cfg(all(feature = "agent-tcb", not(test)))]
     #[doc(hidden)]
     pub fn from_agent_tcb(
@@ -222,8 +221,8 @@ impl PrevoutFact {
         }
     }
 
-    /// Dumb assembler for tesaurus-agent after Core B RPC. Same seal as
-    /// [`ChainView::from_agent_tcb`].
+    /// from_agent_tcb is a dumb public assembler; callers are TCB until the
+    /// call-site lock exists.
     #[cfg(all(feature = "agent-tcb", not(test)))]
     #[doc(hidden)]
     pub fn from_agent_tcb(

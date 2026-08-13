@@ -7,9 +7,10 @@
 //! stages that take Core B facts as inputs, and §8 D5 fee-bump **policy**.
 //!
 //! Production [`ChainView`] / [`AgentAuth`] construction is **not** in this crate:
-//! `tesaurus-agent` maps Core B RPC into the sealed types via the `agent-tcb`
-//! assembler (absent from this crate's tests). There is no public struct-literal
-//! and no `ChainView::from_core_b` here that anyone can call with fake facts.
+//! `tesaurus-agent` maps Core B RPC into private-field types via a dumb
+//! assembler (callers are TCB; not a type-system seal). There is no public
+//! struct-literal and no `ChainView::from_core_b` here that anyone can call
+//! with fake facts.
 //!
 //! Leftover: agent-key signing, transport MAC verification, CI-18, `--via-agent`
 //! unlock. Do **not** unlock `--via-agent`. `evaluate` returning

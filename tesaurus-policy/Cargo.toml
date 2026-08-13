@@ -11,12 +11,13 @@ publish = false
 
 [features]
 default = []
-# Enabled only by tesaurus-agent. Assembles sealed ChainView / PrevoutFact /
-# AgentAuth after Core B RPC. Hidden from this crate's own tests (`not(test)`)
-# even when Cargo unifies workspace features. Not a public lying constructor.
+# tesaurus-agent enables this to assemble ChainView / PrevoutFact / AgentAuth
+# after Core B RPC. Hidden from this crate's own tests (`not(test)`) even when
+# Cargo unifies workspace features. Dumb public assembler: callers are TCB;
+# not a type-system seal.
 agent-tcb = []
 # Dev-only: lets tesaurus-agent tests drive evaluate past AUTH without a MAC.
-# Must not be enabled for production agent builds.
+# Must not appear under [dependencies]; that would bypass AUTH in production.
 agent-test-harness = []
 
 [dependencies]

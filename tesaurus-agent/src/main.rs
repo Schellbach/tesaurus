@@ -56,12 +56,24 @@ mod tests {
         let manifest = Path::new(env!("CARGO_MANIFEST_DIR")).join("Cargo.toml");
         let text = fs::read_to_string(manifest).expect("read Cargo.toml");
         assert!(
-            !text
-                .lines()
-                .any(|line| line.trim_start().starts_with("tesaurus ")
-                    || line.trim_start().starts_with("tesaurus=")),
+            !text.lines().any(line_declares_tesaurus_dep),
             "tesaurus-agent must not depend on the tesaurus WIF-loading crate"
         );
+        assert!(
+            line_declares_tesaurus_dep(r#"tesaurus = { path = "../tesaurus" }"#),
+            "isolation needle must catch space-before-equals coordinator dep"
+        );
+        assert!(!line_declares_tesaurus_dep(
+            r#"tesaurus-policy = { path = "../tesaurus-policy" }"#
+        ));
+    }
+
+    fn line_declares_tesaurus_dep(line: &str) -> bool {
+        let rest = match line.trim_start().strip_prefix("tesaurus") {
+            Some(rest) => rest,
+            None => return false,
+        };
+        rest.trim_start().starts_with('=')
     }
 
     fn walk_assert_no_needles(path: &Path, needles: &[String; 2]) {

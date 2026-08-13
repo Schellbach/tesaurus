@@ -4,9 +4,10 @@
 //! PSBT-only / disabled message. This library does **not** unlock `--via-agent`,
 //! restore HTTP co-signing, or sign PSBTs.
 //!
-//! What landed: Core B RPC mapping into sealed `tesaurus-policy` [`ChainView`] /
+//! What landed: Core B RPC mapping into `tesaurus-policy` [`ChainView`] /
 //! [`PrevoutFact`]. tesaurus-agent is the production TCB that builds those
-//! types. [`AgentAuth`] is fail-closed until a transport MAC is specified.
+//! types (dumb assembler; not a type-system seal). [`AgentAuth`] is fail-closed
+//! until a transport MAC is specified.
 //!
 //! This crate must not depend on the coordinator `tesaurus` crate and must not
 //! load primary/override key material.
@@ -26,3 +27,6 @@ pub fn disabled_message() -> &'static str {
     "tesaurus-agent is disabled: the legacy HTTP protocol could expose primary key material; \
      use only local regtest/testnet signing until a reviewed PSBT-only protocol ships"
 }
+
+#[cfg(test)]
+mod isolation;

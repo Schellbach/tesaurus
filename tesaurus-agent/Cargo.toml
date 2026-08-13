@@ -26,6 +26,7 @@ thiserror.workspace = true
 
 [dev-dependencies]
 tempfile.workspace = true
+# agent-test-harness bypasses AUTH; never enable it under [dependencies].
 tesaurus-policy = { path = "../tesaurus-policy", features = ["agent-tcb", "agent-test-harness"] }
 
 [lints]

@@ -1,4 +1,4 @@
-//! Core B facts → sealed [`ChainView`].
+//! Core B facts → policy [`ChainView`].
 //!
 //! tesaurus-agent is the production constructor. Policy cannot defend against
 //! a lying view; this module must fill fields from Core B (or a test double of
@@ -34,7 +34,7 @@ pub trait CoreB {
 }
 
 /// Production constructor: map Core B RPC (or a mock of that RPC) into the
-/// sealed policy [`ChainView`]. Missing/unconfirmed prevouts are omitted so
+/// policy [`ChainView`]. Missing/unconfirmed prevouts are omitted so
 /// `evaluate` rejects with `PREVOUT_MISSING` rather than inventing facts.
 pub fn chain_view_from_core_b<C: CoreB>(
     core: &C,
