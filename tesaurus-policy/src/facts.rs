@@ -8,23 +8,48 @@
 //! **Tests may lie; production must not.**
 //!
 //! There is no public struct-literal for [`ChainView`] or [`PrevoutFact`], and
-//! no `ChainView::from_core_b` yet (live Core B RPC is leftover in
-//! `tesaurus-agent`). The only constructors are `#[cfg(test)]` and are named
-//! `from_test_facts` so a future agent cannot accidentally pass coordinator
-//! metadata through.
+//! no `ChainView::from_core_b` on this crate (anyone could pass fake facts).
+//! Live Core B RPC mapping lives in `tesaurus-agent`. The only constructors
+//! available in this crate's tests are `#[cfg(test)]` and are named
+//! `from_test_facts` so the agent cannot accidentally pass coordinator
+//! metadata through (`from_test_facts` is absent when this crate is a
+//! dependency).
 //!
-//! [`AgentAuth`] is not a `bool`. There is no production constructor until the
-//! agent verifies a transport MAC locally. Tests use
-//! [`AgentAuth::for_test_verified`] / [`AgentAuth::for_test_rejected`]. A
-//! coordinator-supplied flag cannot be forwarded.
+//! The `agent-tcb` feature (tesaurus-agent only) exposes a dumb assembler
+//! used after Core B RPC. It is also `cfg(not(test))`, so these unit tests
+//! cannot call it as a lying constructor even under workspace feature
+//! unification.
+//!
+//! [`AgentAuth`] is not a `bool`. There is no production constructor that
+//! marks auth verified until the agent verifies a transport MAC locally.
+//! Tests use [`AgentAuth::for_test_verified`] / [`AgentAuth::for_test_rejected`].
+//! A coordinator-supplied flag cannot be forwarded.
+//!
+//! ```compile_fail
+//! fn _no_struct_literal(view: tesaurus_policy::ChainView) {
+//!     let _ = tesaurus_policy::ChainView {
+//!         genesis_hash: view.genesis_hash(),
+//!         tip_height: view.tip_height(),
+//!         now_unix: view.now_unix(),
+//!         prevouts: Vec::new(),
+//!     };
+//! }
+//! ```
+//!
+//! ```compile_fail
+//! fn _no_from_core_b_on_policy() {
+//!     let _ = tesaurus_policy::ChainView::from_core_b;
+//! }
+//! ```
 
 use bitcoin::{Amount, BlockHash, OutPoint, ScriptBuf};
 
 /// Opaque mark that transport authentication succeeded **in this agent**.
 ///
 /// Do not reconstruct this from a coordinator field. Production construction
-/// (`verified_by_this_agent` after a local MAC check) is leftover with the
-/// auth-MAC / `--via-agent` unlock.
+/// that marks verified (`verified_by_this_agent` after a local MAC check) is
+/// leftover with the auth-MAC / `--via-agent` unlock. tesaurus-agent may
+/// assemble a fail-closed (always rejected) mark until that protocol exists.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct AgentAuth {
     ok: bool,
@@ -36,14 +61,25 @@ impl AgentAuth {
     }
 
     /// Test-only: pretend the agent verified auth. Production must not call this.
-    #[cfg(test)]
+    ///
+    /// Available to this crate's tests and to tesaurus-agent tests via the
+    /// `agent-test-harness` feature (dev-dependency only).
+    #[cfg(any(test, feature = "agent-test-harness"))]
     pub fn for_test_verified() -> Self {
         Self { ok: true }
     }
 
     /// Test-only: pretend auth failed.
-    #[cfg(test)]
+    #[cfg(any(test, feature = "agent-test-harness"))]
     pub fn for_test_rejected() -> Self {
+        Self { ok: false }
+    }
+
+    /// Fail-closed assembler for tesaurus-agent: transport MAC is unspecified.
+    /// Always rejected. No `bool` parameter; cannot mark verified.
+    #[cfg(all(feature = "agent-tcb", not(test)))]
+    #[doc(hidden)]
+    pub fn from_agent_tcb_mac_unspecified() -> Self {
         Self { ok: false }
     }
 }
@@ -79,11 +115,29 @@ impl ChainView {
 
     /// Test-only constructor. **May lie** about CSV, unspent, scripts, and time.
     ///
-    /// Production must not use this. When Core B RPC lands, add
-    /// `ChainView::from_core_b(...)` that fills these fields from bitcoind, not
-    /// from the coordinator.
+    /// Production must not use this. tesaurus-agent maps Core B RPC through
+    /// [`ChainView::from_agent_tcb`], never this function.
     #[cfg(test)]
     pub fn from_test_facts(
+        genesis_hash: BlockHash,
+        tip_height: u32,
+        now_unix: u64,
+        prevouts: Vec<PrevoutFact>,
+    ) -> Self {
+        Self {
+            genesis_hash,
+            tip_height,
+            now_unix,
+            prevouts,
+        }
+    }
+
+    /// Dumb assembler for tesaurus-agent after Core B RPC. Not `from_core_b`
+    /// and not available in this crate's tests. Callers who pass fabricated
+    /// values become the TCB — only tesaurus-agent should call this.
+    #[cfg(all(feature = "agent-tcb", not(test)))]
+    #[doc(hidden)]
+    pub fn from_agent_tcb(
         genesis_hash: BlockHash,
         tip_height: u32,
         now_unix: u64,
@@ -167,6 +221,28 @@ impl PrevoutFact {
             visible_unspent,
         }
     }
+
+    /// Dumb assembler for tesaurus-agent after Core B RPC. Same seal as
+    /// [`ChainView::from_agent_tcb`].
+    #[cfg(all(feature = "agent-tcb", not(test)))]
+    #[doc(hidden)]
+    pub fn from_agent_tcb(
+        outpoint: OutPoint,
+        value: Amount,
+        script_pubkey: ScriptBuf,
+        confirm_height: u32,
+        header_time_unix: u64,
+        visible_unspent: bool,
+    ) -> Self {
+        Self {
+            outpoint,
+            value,
+            script_pubkey,
+            confirm_height,
+            header_time_unix,
+            visible_unspent,
+        }
+    }
 }
 
 #[cfg(test)]
@@ -177,8 +253,9 @@ mod tests {
 
     #[test]
     fn test_constructors_are_the_only_way_to_build_lying_views() {
-        // Production has no from_core_b and no public fields. This named
-        // constructor is how tests lie; a future agent must not call it.
+        // Production has no from_core_b on this crate and no public fields.
+        // This named constructor is how tests lie; tesaurus-agent must not
+        // call it (and cannot: it is cfg(test) on this crate only).
         let view = ChainView::from_test_facts(
             BlockHash::from_byte_array([0u8; 32]),
             1,

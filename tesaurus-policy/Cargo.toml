@@ -9,6 +9,16 @@ repository.workspace = true
 rust-version.workspace = true
 publish = false
 
+[features]
+default = []
+# Enabled only by tesaurus-agent. Assembles sealed ChainView / PrevoutFact /
+# AgentAuth after Core B RPC. Hidden from this crate's own tests (`not(test)`)
+# even when Cargo unifies workspace features. Not a public lying constructor.
+agent-tcb = []
+# Dev-only: lets tesaurus-agent tests drive evaluate past AUTH without a MAC.
+# Must not be enabled for production agent builds.
+agent-test-harness = []
+
 [dependencies]
 bitcoin.workspace = true
 hex.workspace = true

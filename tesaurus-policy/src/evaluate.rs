@@ -1,8 +1,8 @@
 //! §6 validation state machine (pure; Core B facts are caller-supplied inputs).
 //!
 //! Does **not** sign, talk to bitcoind, or load keys. `tesaurus-agent` remains
-//! fail-closed. Follow-up: Core B RPC + agent-key signing behind a reviewed
-//! `--via-agent` unlock.
+//! fail-closed. Follow-up: agent-key signing behind a reviewed `--via-agent`
+//! unlock. Core B RPC mapping lives in `tesaurus-agent`, not here.
 //!
 //! [`PolicyOutcome::ValidatedUnsigned`] is **not** a co-sign: the replay payload
 //! is [`crate::replay::ReplayPayload::Unsigned`]. Only
@@ -11,7 +11,7 @@
 //!
 //! [`ChainView`] / [`AgentAuth`]: tests may lie via `from_test_facts` /
 //! `for_test_*`. Production must not; there is no public struct-literal and no
-//! `from_core_b` / MAC constructor yet.
+//! `from_core_b` on this crate. `tesaurus-agent` is the TCB that builds the view.
 //!
 //! Normative order (protocol §6): AUTH → parse v0 → durable replay (D4/D5 store
 //! shape) → remaining structure → pin/witness match → foreign inputs →

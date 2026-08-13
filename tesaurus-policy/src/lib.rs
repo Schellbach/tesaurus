@@ -6,9 +6,14 @@
 //! Landed here: PSBT v0 parse, `AgentPin` + miniscript descriptor matching, §6
 //! stages that take Core B facts as inputs, and §8 D5 fee-bump **policy**.
 //!
-//! Leftover (do not silently skip; next slice): Core B RPC (`ChainView::from_core_b`)
-//! and agent-key signing in `tesaurus-agent`. Do **not** unlock `--via-agent`.
-//! `evaluate` returning `ValidatedUnsigned` is not a co-sign.
+//! Production [`ChainView`] / [`AgentAuth`] construction is **not** in this crate:
+//! `tesaurus-agent` maps Core B RPC into the sealed types via the `agent-tcb`
+//! assembler (absent from this crate's tests). There is no public struct-literal
+//! and no `ChainView::from_core_b` here that anyone can call with fake facts.
+//!
+//! Leftover: agent-key signing, transport MAC verification, CI-18, `--via-agent`
+//! unlock. Do **not** unlock `--via-agent`. `evaluate` returning
+//! `ValidatedUnsigned` is not a co-sign.
 
 pub mod confirm;
 pub mod constants;
