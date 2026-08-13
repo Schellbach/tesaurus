@@ -664,6 +664,7 @@ version = "0.2.0"
 dependencies = [
  "bitcoin",
  "hex",
+ "miniscript",
  "serde",
  "serde_json",
  "tempfile",

@@ -11,10 +11,14 @@ pub struct VelocitySample {
 }
 
 pub fn check_velocity_per_signature(external_sats: u64) -> PolicyResult<()> {
-    if external_sats > VELOCITY_PER_SIG_SATS {
+    check_velocity_cap(external_sats, VELOCITY_PER_SIG_SATS)
+}
+
+pub fn check_velocity_cap(external_sats: u64, cap: u64) -> PolicyResult<()> {
+    if external_sats > cap {
         return Err(PolicyError::new(
             PolicyErrorCode::Velocity,
-            format!("external {external_sats} exceeds per-signature cap {VELOCITY_PER_SIG_SATS}"),
+            format!("external {external_sats} exceeds per-signature cap {cap}"),
         ));
     }
     Ok(())
@@ -29,7 +33,24 @@ pub fn check_velocity_window(
     tip_height: u32,
     this_external: u64,
 ) -> PolicyResult<()> {
-    check_velocity_per_signature(this_external)?;
+    check_velocity_window_capped(
+        samples,
+        tip_height,
+        this_external,
+        VELOCITY_PER_SIG_SATS,
+        VELOCITY_PER_144_SATS,
+    )
+}
+
+/// Same as [`check_velocity_window`], with caps taken from `AgentPin`.
+pub fn check_velocity_window_capped(
+    samples: &[VelocitySample],
+    tip_height: u32,
+    this_external: u64,
+    per_sig_sats: u64,
+    per_window_sats: u64,
+) -> PolicyResult<()> {
+    check_velocity_cap(this_external, per_sig_sats)?;
     let window_start = tip_height.saturating_sub(VELOCITY_WINDOW_BLOCKS.saturating_sub(1));
     let mut total = this_external;
     for sample in samples {
@@ -42,10 +63,12 @@ pub fn check_velocity_window(
             })?;
         }
     }
-    if total > VELOCITY_PER_144_SATS {
+    if total > per_window_sats {
         return Err(PolicyError::new(
             PolicyErrorCode::Velocity,
-            format!("window total {total} exceeds {VELOCITY_PER_144_SATS} over {VELOCITY_WINDOW_BLOCKS} blocks"),
+            format!(
+                "window total {total} exceeds {per_window_sats} over {VELOCITY_WINDOW_BLOCKS} blocks"
+            ),
         ));
     }
     Ok(())

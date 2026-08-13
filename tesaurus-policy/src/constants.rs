@@ -22,3 +22,9 @@ pub const VELOCITY_PER_144_SATS: u64 = 50_000_000;
 
 /// Trailing window length for the cumulative velocity cap.
 pub const VELOCITY_WINDOW_BLOCKS: u32 = 144;
+
+/// Absolute fee cap for agent-path PSBTs (anti-DoS; coordinator may be stricter).
+pub const MAX_POLICY_FEE_SATS: u64 = 1_000_000;
+
+/// Maximum inputs on an agent-path PSBT (anti-DoS).
+pub const MAX_POLICY_INPUTS: usize = 100;

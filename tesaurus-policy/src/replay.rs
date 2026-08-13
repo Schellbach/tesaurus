@@ -13,9 +13,8 @@
 //!    a **D5 vault-change-only** mutation: **identical outpoint sets** (same
 //!    inputs, not a superset/subset), external destination and amount
 //!    unchanged, vault change strictly decreased / fee increased, no new
-//!    external outputs. Adding or dropping inputs stays `REPLAY` until §8 is
-//!    wired with an explicit rule. Full §8 policy still runs when fee-bump
-//!    signing is implemented.
+//!    external outputs. Adding or dropping inputs stays `REPLAY`. Full §8
+//!    policy still runs in `evaluate` (fee-bump is not a privileged skip).
 
 use std::collections::HashSet;
 use std::fs::{self, File, OpenOptions};
@@ -24,10 +23,12 @@ use std::path::{Path, PathBuf};
 
 use bitcoin::consensus::Encodable;
 use bitcoin::hashes::{sha256, Hash};
+use bitcoin::psbt::Psbt;
 use bitcoin::{OutPoint, ScriptBuf, TxOut};
 use serde::{Deserialize, Serialize};
 
 use crate::error::{PolicyError, PolicyErrorCode, PolicyResult};
+use crate::pin::AgentPin;
 
 const STORE_VERSION_TAG: &str = "TESAURUS_REPLAY_V1\n";
 const RECORDS_FILE: &str = "records.json";
@@ -72,11 +73,39 @@ pub struct ReplayRecord {
     pub outputs: Vec<TxOut>,
     /// Pinned vault script; used to classify change vs external for D5.
     ///
-    /// Wiring invariant for later (not enforced at runtime in this crate):
-    /// this field MUST be copied from `AgentPin`, never taken from the request.
+    /// Must be copied from `AgentPin` (`evaluate` / `ReplayRecord::from_pin`).
+    /// Never take this from request-supplied metadata.
     pub vault_script: ScriptBuf,
     pub outputs_commitment: [u8; 32],
     pub signed_psbt_or_partial: Vec<u8>,
+}
+
+impl ReplayRecord {
+    /// Construct a candidate from the pin and PSBT. `vault_script` is always
+    /// copied from `AgentPin`, never from request metadata.
+    pub fn from_pin(
+        pin: &AgentPin,
+        request_id: [u8; 16],
+        psbt: &Psbt,
+        psbt_bytes: &[u8],
+        signed_psbt_or_partial: Vec<u8>,
+    ) -> PolicyResult<Self> {
+        let tx = &psbt.unsigned_tx;
+        let psbt_txid = tx.compute_txid().to_byte_array();
+        let content = psbt_content_hash(psbt_bytes);
+        let outputs = tx.output.clone();
+        let outputs_commitment = outputs_commitment(&outputs)?;
+        Ok(Self {
+            request_id,
+            replay_id: replay_id(&request_id, &psbt_txid, &content),
+            psbt_txid,
+            outpoints: tx.input.iter().map(|i| i.previous_output).collect(),
+            outputs,
+            vault_script: pin.script_pubkey().clone(),
+            outputs_commitment,
+            signed_psbt_or_partial,
+        })
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -86,8 +115,8 @@ pub enum ReplayVerdict {
     /// Honest retry: return the previously stored payload. Do not re-sign.
     Idempotent { signed_psbt_or_partial: Vec<u8> },
     /// Identical outpoint sets + vault-change-only (D5). Not `REPLAY`.
-    /// Adding or dropping inputs is still `REPLAY`. Caller must still run full
-    /// §8 policy when fee-bump signing is wired; this crate does not sign.
+    /// Adding or dropping inputs is still `REPLAY`. Caller must still run the
+    /// full §6/§8 machine (`evaluate`); this crate does not sign.
     FeeBump,
 }
 
@@ -184,6 +213,10 @@ impl ReplayStore {
         })
     }
 
+    pub fn records(&self) -> &[ReplayRecord] {
+        &self.records
+    }
+
     pub fn preflight(&self, candidate: &ReplayRecord) -> PolicyResult<ReplayVerdict> {
         if let Some(existing) = self
             .records
@@ -258,7 +291,7 @@ fn outpoints_overlap(a: &[OutPoint], b: &[OutPoint]) -> bool {
     b.iter().any(|op| set.contains(op))
 }
 
-fn outpoints_identical(a: &[OutPoint], b: &[OutPoint]) -> bool {
+pub fn outpoints_identical(a: &[OutPoint], b: &[OutPoint]) -> bool {
     let set_a: HashSet<_> = a.iter().copied().collect();
     let set_b: HashSet<_> = b.iter().copied().collect();
     !set_a.is_empty() && set_a == set_b
@@ -291,7 +324,7 @@ fn classify_outputs(outputs: &[TxOut], vault_script: &ScriptBuf) -> Option<Class
 /// D5 carve-out: **identical outpoint sets**, same external destination and
 /// amount, vault change strictly decreased (fee increased), no new external
 /// outputs. A superset/subset of inputs is not a fee-bump.
-fn is_vault_change_only(previous: &ReplayRecord, candidate: &ReplayRecord) -> bool {
+pub fn is_vault_change_only(previous: &ReplayRecord, candidate: &ReplayRecord) -> bool {
     if !outpoints_identical(&previous.outpoints, &candidate.outpoints) {
         return false;
     }
