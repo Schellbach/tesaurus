@@ -1,4 +1,6 @@
 //! Call-site lock for the dumb public assembler. Not a type-system TCB seal.
+//! Walks the **workspace root** (skips `target`) so a coordinator or new crate
+//! calling the assembler fails this lock.
 
 use std::fs;
 use std::path::{Path, PathBuf};
@@ -13,7 +15,7 @@ fn workspace_root() -> PathBuf {
 fn walk_rs(path: &Path, out: &mut Vec<PathBuf>) {
     if path.is_dir() {
         let name = path.file_name().and_then(|n| n.to_str()).unwrap_or("");
-        if name == "target" {
+        if name == "target" || name == ".git" {
             return;
         }
         for entry in fs::read_dir(path).expect("read dir") {
@@ -29,8 +31,7 @@ fn walk_rs(path: &Path, out: &mut Vec<PathBuf>) {
 fn ident_hits(ident: &str) -> Vec<(PathBuf, usize, String)> {
     let root = workspace_root();
     let mut files = Vec::new();
-    walk_rs(&root.join("tesaurus-policy"), &mut files);
-    walk_rs(&root.join("tesaurus-agent"), &mut files);
+    walk_rs(&root, &mut files);
     let mut hits = Vec::new();
     for path in files {
         let text = fs::read_to_string(&path).expect("read rust");
@@ -107,6 +108,14 @@ fn auth_assembler_call_sites() {
     }
 }
 
+fn is_production_dependency_section(name: &str) -> bool {
+    let n = name.trim();
+    if n.contains("dev-dependencies") {
+        return false;
+    }
+    n == "dependencies" || n.starts_with("dependencies.") || n.ends_with("dependencies")
+}
+
 #[test]
 fn agent_test_harness_is_not_a_production_dependency() {
     let root = workspace_root();
@@ -114,7 +123,7 @@ fn agent_test_harness_is_not_a_production_dependency() {
     fn walk_toml(path: &Path, bad: &mut Vec<String>) {
         if path.is_dir() {
             let name = path.file_name().and_then(|n| n.to_str()).unwrap_or("");
-            if name == "target" {
+            if name == "target" || name == ".git" {
                 return;
             }
             for entry in fs::read_dir(path).expect("read dir") {
@@ -135,7 +144,7 @@ fn agent_test_harness_is_not_a_production_dependency() {
                     continue;
                 }
             }
-            if section == "dependencies" && line.contains("agent-test-harness") {
+            if is_production_dependency_section(&section) && line.contains("agent-test-harness") {
                 bad.push(format!("{}:{}:{line}", path.display(), i + 1));
             }
         }
@@ -143,7 +152,19 @@ fn agent_test_harness_is_not_a_production_dependency() {
     walk_toml(&root, &mut bad);
     assert!(
         bad.is_empty(),
-        "agent-test-harness under [dependencies] bypasses AUTH:\n{}",
+        "agent-test-harness under production dependency sections bypasses AUTH:\n{}",
         bad.join("\n")
     );
+    assert!(!is_production_dependency_section("dev-dependencies"));
+    assert!(!is_production_dependency_section(
+        "target.'cfg(unix)'.dev-dependencies"
+    ));
+    assert!(is_production_dependency_section("dependencies"));
+    assert!(is_production_dependency_section(
+        "dependencies.tesaurus-policy"
+    ));
+    assert!(is_production_dependency_section("workspace.dependencies"));
+    assert!(is_production_dependency_section(
+        "target.'cfg(unix)'.dependencies"
+    ));
 }
