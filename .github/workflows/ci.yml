@@ -23,11 +23,11 @@ jobs:
       - name: Show pinned toolchain
         run: rustc --version && cargo --version
       - name: Check formatting
-        run: cargo fmt --check
+        run: cargo fmt --all --check
       - name: Run tests
-        run: cargo test --locked
+        run: cargo test --locked --workspace
       - name: Run Clippy
-        run: cargo clippy --locked --all-targets -- -D warnings
+        run: cargo clippy --locked --workspace --all-targets -- -D warnings
       - name: Verify fail-closed entry points
         shell: bash
         run: |
@@ -49,6 +49,14 @@ jobs:
           if cargo run --quiet --bin tesaurus -- spend \
             --to invalid --amount-sats 1 --via-agent; then
             echo "--via-agent unexpectedly succeeded"
+            exit 1
+          fi
+          if grep -R -n -E 'primary\.wif|override\.wif' tesaurus-agent tesaurus-policy; then
+            echo "policy/agent crates must not mention coordinator WIF filenames"
+            exit 1
+          fi
+          if grep -E '^tesaurus[[:space:]]*=' tesaurus-agent/Cargo.toml; then
+            echo "tesaurus-agent must not depend on the tesaurus WIF-loading crate"
             exit 1
           fi
       - name: Build release binaries

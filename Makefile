@@ -7,16 +7,16 @@ release:
 	cargo build --release --locked
 
 test:
-	cargo test --locked
+	cargo test --locked --workspace
 
 fmt:
-	cargo fmt
+	cargo fmt --all
 
 fmt-check:
-	cargo fmt --check
+	cargo fmt --all --check
 
 clippy:
-	cargo clippy --locked --all-targets -- -D warnings
+	cargo clippy --locked --workspace --all-targets -- -D warnings
 
 audit:
 	cargo audit

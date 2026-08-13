@@ -59,7 +59,7 @@ Threat model (gate 0 ACCEPTED): [`THREAT_MODEL.md`](THREAT_MODEL.md).
 
 | Crate / binary | Responsibility |
 |---|---|
-| **`tesaurus-policy`** | Pure validation: pin checks, PSBT structural rules, amount/fee math, velocity accounting helpers, confirm preimage verify, error codes (`FOREIGN_INPUT`, `NOT_RECOVERY_PATH`, …). No RPC. No key I/O. |
+| **`tesaurus-policy`** | Pure validation: pin checks, PSBT structural rules, amount/fee math, velocity, confirm preimage verify, crash-safe R1 replay store, enumerable error codes. No RPC. No key I/O. |
 | **`tesaurus-agent`** | Process: load agent key + `AgentPin`, Core B RPC, durable replay store, auth, call policy, sign, return PSBT with partial sig |
 | **`tesaurus`** | Coordinator CLI: Core A, build PSBT, obtain HW/override signatures as needed, request agent co-sign, broadcast |
 
@@ -120,10 +120,11 @@ SignResponse::Ok { psbt }           // same tx, agent partial sig added
 SignResponse::Reject { code, msg }  // stable error codes for CI
 ```
 
-Stable reject codes include: `AUTH`, `REPLAY`, `PSBT_MALFORMED`,
-`PIN_MISMATCH`, `FOREIGN_INPUT`, `NOT_RECOVERY_PATH`, `CSV_IMMATURE`,
-`WALL_CLOCK`, `AMOUNT`, `VELOCITY`, `CONFIRM_REQUIRED`, `CONFIRM_INVALID`,
-`SIGHASH`, `LOCKTIME`, `FEE_BUMP_DENIED`.
+Stable reject codes include: `AUTH`, `REPLAY`, `REPLAY_CONFLICT`,
+`PSBT_PARSE`, `FOREIGN_INPUT`, `NOT_RECOVERY_PATH`, `CSV_IMMATURE_DEPTH`,
+`CSV_IMMATURE_WALLCLOCK`, `VELOCITY`, `CONFIRM_REQUIRED`, `CONFIRM_INVALID`,
+`SIGHASH`, `LOCKTIME`, `FEE_BUMP_INVALID` (see `tesaurus-policy`
+`PolicyErrorCode` for the enumerable set).
 
 ---
 
@@ -132,13 +133,21 @@ Stable reject codes include: `AUTH`, `REPLAY`, `PSBT_MALFORMED`,
 Every `SignRequest` runs these stages **in this exact order**. Failure aborts
 with no signature. Replay insertion (D4) occurs before signing as specified.
 
-### 6.1 Authentication & durable replay (D4)
+### 6.1 Authentication & durable replay (D4 / Aldo R1)
 
 1. Verify `auth` over the canonical request encoding → else `AUTH`.
 2. Compute `replay_id = SHA256(request_id || psbt_txid || psbt_content_hash)`.
-3. If `replay_id` exists in the durable store → `REPLAY`.
-4. Insert `replay_id` **before** signing (fail closed if insert fails).
-5. Retention: **vault lifetime** (see §15.2). Do not prune on a timer while the
+3. Index the durable store by `request_id` **and** spent outpoints. A missing
+   or corrupt store refuses to sign.
+4. Same `request_id` + same `replay_id` → **idempotent cached Ok** (honest
+   retry after a network drop). This is **not** a hard `REPLAY`.
+5. Same `request_id` + different `replay_id` → `REPLAY_CONFLICT`; do not sign.
+6. Same outpoints already signed with different outputs (any `request_id`) →
+   `REPLAY`.
+7. First success: persist `{request_id, replay_id, psbt_txid, outpoints,
+   signed_psbt_or_partial}` **before** returning Ok (fail closed if persist
+   fails).
+8. Retention: **vault lifetime** (see §15.2). Do not prune on a timer while the
    vault pin remains active.
 
 ### 6.2 PSBT structure
@@ -315,7 +324,7 @@ weaken current containment CI.
 | CI-12 | Unit: confirm not required below 5M external | Signs without token |
 | CI-13 | Unit: sighash ≠ ALL | `SIGHASH` |
 | CI-14 | Unit: locktime ≠ 0 | `LOCKTIME` |
-| CI-15 | Unit: durable replay (D4) | Second identical request `REPLAY` after restart; vault-lifetime retention |
+| CI-15 | Unit: durable replay (D4 / R1) | Identical `request_id`+`replay_id` is idempotent cached Ok across restart; vault-lifetime retention |
 | CI-16 | Unit: fee-bump full policy (D5) | Bump without full checks denied; honest bump ok |
 | CI-17 | Property: amount conservation | No signed PSBT with negative fee / diverted change |
 | CI-18 | Dual-node regtest | Core B disagreement with poisoned metadata → reject |
@@ -324,6 +333,7 @@ weaken current containment CI.
 | CI-21 | Confirm threshold external-only (§15.3) | Cases in §15.3 table; `E+C` must not drive threshold |
 | CI-22 | Confirm preimage encoding (§15.1) | Vectors for `TESAURUS_CONFIRM_V1\|\|u8(1)\|\|uuid16\|\|txid32\|\|u64_be\|\|genesis32` |
 | CI-23 | Normative §6 stage order | Mutating earlier-stage failures never reach later stages / signing |
+| CI-24 | Unit: R1 replay split | Idempotent cached payload; `REPLAY_CONFLICT` on same `request_id` different PSBT; `REPLAY` on same outpoints different outputs |
 
 Current repo Security CI already covers CI-01..CI-03 style containment. CI-04+
 arrive with implementation.
@@ -432,9 +442,12 @@ txid endianness, wrong amount, wrong genesis, and a known-valid compact64.
 
 ### 15.2 Replay retention (D4)
 
-- Store: crash-safe durable KV or SQLite WAL (or equivalent).
-- Key: `replay_id` from §6.1.
-- Value: `{ created_at, tip_height_at_sign, external_sats, request_id }`.
+- Store: crash-safe durable KV or SQLite WAL (or equivalent). Indexed by
+  `request_id` and spent outpoints; `replay_id` is
+  `SHA256(request_id || psbt_txid || psbt_content_hash)`.
+- Value: `{ request_id, replay_id, psbt_txid, outpoints, signed_psbt_or_partial, … }`
+  (see §6.1 R1: identical `replay_id` is idempotent; a different `replay_id` for
+  the same `request_id` is `REPLAY_CONFLICT`).
 - **Retention: vault lifetime.** While the current `AgentPin` / vault remains
   provisioned, do **not** time-prune replay records. Clearing the store is an
   explicit re-provision / vault-rotation ceremony, not a background job.

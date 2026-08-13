@@ -1,0 +1,24 @@
+[package]
+name = "tesaurus-agent"
+version.workspace = true
+edition.workspace = true
+authors.workspace = true
+description = "Disabled pending a reviewed PSBT-only co-signing protocol"
+license.workspace = true
+repository.workspace = true
+rust-version.workspace = true
+publish = false
+
+[[bin]]
+name = "tesaurus-agent"
+path = "src/main.rs"
+
+[dependencies]
+anyhow.workspace = true
+clap.workspace = true
+
+[dev-dependencies]
+tesaurus-policy = { path = "../tesaurus-policy" }
+
+[lints]
+workspace = true

@@ -50,6 +50,8 @@ Research caution above still applies. The accepted production planning docs are:
 
 `--via-agent` and `tesaurus-agent` remain fail-closed until that protocol is
 implemented, the Security CI matrix is green, and the unlock is reviewed.
+The `tesaurus-policy` workspace crate is in progress (confirm token, CSV /
+wall-clock, R1 replay); it does not unlock `--via-agent`.
 
 ## Working research surface
 
@@ -159,9 +161,9 @@ No HTTP signer is active.
 ## Development
 
 ```bash
-cargo fmt --check
-cargo test --locked
-cargo clippy --locked --all-targets -- -D warnings
+cargo fmt --all --check
+cargo test --locked --workspace
+cargo clippy --locked --workspace --all-targets -- -D warnings
 cargo build --release --locked
 ```
 

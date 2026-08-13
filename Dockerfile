@@ -2,6 +2,8 @@
 FROM rust:1.97-bookworm AS builder
 WORKDIR /app
 COPY Cargo.toml Cargo.lock ./
+COPY tesaurus-policy ./tesaurus-policy
+COPY tesaurus-agent ./tesaurus-agent
 COPY src ./src
 RUN cargo build --release --locked --bin tesaurus
 
