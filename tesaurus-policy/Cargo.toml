@@ -3,7 +3,7 @@ name = "tesaurus-policy"
 version.workspace = true
 edition.workspace = true
 authors.workspace = true
-description = "Pure Tesaurus agent policy: confirm tokens, CSV/wall-clock, R1 replay (no key I/O)"
+description = "Pure Tesaurus agent policy: PSBT v0, AgentPin, confirm, CSV/wall-clock, R1 replay, D5 (no key I/O)"
 license.workspace = true
 repository.workspace = true
 rust-version.workspace = true
@@ -12,6 +12,7 @@ publish = false
 [dependencies]
 bitcoin.workspace = true
 hex.workspace = true
+miniscript.workspace = true
 serde.workspace = true
 serde_json.workspace = true
 thiserror.workspace = true

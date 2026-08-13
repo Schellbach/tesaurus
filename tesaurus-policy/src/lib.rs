@@ -3,13 +3,20 @@
 //! Pure validation and crash-safe replay: **no WIF / key-file I/O**, no RPC, and
 //! no network co-signing. `tesaurus-agent` and `--via-agent` remain fail-closed.
 //!
-//! TODO(gate-2): full PSBT v0 + miniscript descriptor matching, Core B wiring,
-//! and D5 fee-bump revalidation per `docs/PSBT_AGENT_PROTOCOL.md` §6 / §8.
+//! Landed here: PSBT v0 parse, `AgentPin` + miniscript descriptor matching, §6
+//! stages that take Core B facts as inputs, and §8 D5 fee-bump **policy**.
+//!
+//! Leftover (do not silently skip; next slice): Core B RPC (`ChainView::from_core_b`)
+//! and agent-key signing in `tesaurus-agent`. Do **not** unlock `--via-agent`.
+//! `evaluate` returning `ValidatedUnsigned` is not a co-sign.
 
 pub mod confirm;
 pub mod constants;
 pub mod csv;
 pub mod error;
+pub mod evaluate;
+pub mod facts;
+pub mod pin;
 pub mod replay;
 pub mod structure;
 pub mod velocity;
@@ -19,22 +26,33 @@ pub use confirm::{
     txid_display_bytes, verify_confirm_token, ConfirmBinding, OOB_CONFIRM_SATS,
 };
 pub use constants::{
-    CSV_BLOCKS_DEFAULT, SAFETY_MARGIN_BLOCKS, VELOCITY_PER_144_SATS, VELOCITY_PER_SIG_SATS,
-    VELOCITY_WINDOW_BLOCKS, WALL_CLOCK_SECONDS_PER_BLOCK,
+    CSV_BLOCKS_DEFAULT, MAX_POLICY_FEE_SATS, MAX_POLICY_INPUTS, SAFETY_MARGIN_BLOCKS,
+    VELOCITY_PER_144_SATS, VELOCITY_PER_SIG_SATS, VELOCITY_WINDOW_BLOCKS,
+    WALL_CLOCK_SECONDS_PER_BLOCK,
 };
 pub use csv::{
     check_csv_maturity, csv_depth, csv_depth_is_mature, wall_clock_deadline_unix,
     wall_clock_is_mature,
 };
 pub use error::{PolicyError, PolicyErrorCode, PolicyResult};
+pub use evaluate::{
+    enforce_fee_bump_policy, evaluate, AmountBreakdown, PolicyOutcome, PolicyRequest,
+};
+pub use facts::{AgentAuth, ChainView, PrevoutFact};
+pub use pin::AgentPin;
 pub use replay::{
-    outputs_commitment, psbt_content_hash, replay_id, ReplayRecord, ReplayStore, ReplayVerdict,
+    is_vault_change_only, outpoints_identical, outputs_commitment, psbt_content_hash, replay_id,
+    ReplayPayload, ReplayRecord, ReplayStore, ReplayVerdict,
 };
 pub use structure::{
-    require_all_vault_input_scripts, require_locktime_zero, require_recovery_sequence,
-    require_sighash_all,
+    parse_psbt_v0, require_all_vault_input_scripts, require_locktime_zero,
+    require_no_unknown_psbt_fields, require_recovery_sequence, require_sighash_all,
+    require_sighash_all_on_psbt,
 };
-pub use velocity::{check_velocity_per_signature, check_velocity_window, VelocitySample};
+pub use velocity::{
+    check_velocity_cap, check_velocity_per_signature, check_velocity_window,
+    check_velocity_window_capped, VelocitySample,
+};
 
 #[cfg(test)]
 mod isolation_tests {
