@@ -6,14 +6,16 @@
 //! Landed here: PSBT v0 parse, `AgentPin` + miniscript descriptor matching, §6
 //! stages that take Core B facts as inputs, and §8 D5 fee-bump **policy**.
 //!
-//! Leftover (do not silently skip; next slice): Core B RPC and agent-key
-//! signing in `tesaurus-agent`. Do **not** unlock `--via-agent` in this crate.
+//! Leftover (do not silently skip; next slice): Core B RPC (`ChainView::from_core_b`)
+//! and agent-key signing in `tesaurus-agent`. Do **not** unlock `--via-agent`.
+//! `evaluate` returning `ValidatedUnsigned` is not a co-sign.
 
 pub mod confirm;
 pub mod constants;
 pub mod csv;
 pub mod error;
 pub mod evaluate;
+pub mod facts;
 pub mod pin;
 pub mod replay;
 pub mod structure;
@@ -34,13 +36,13 @@ pub use csv::{
 };
 pub use error::{PolicyError, PolicyErrorCode, PolicyResult};
 pub use evaluate::{
-    enforce_fee_bump_policy, evaluate, AmountBreakdown, ChainView, PolicyOutcome, PolicyRequest,
-    PrevoutFact,
+    enforce_fee_bump_policy, evaluate, AmountBreakdown, PolicyOutcome, PolicyRequest,
 };
+pub use facts::{AgentAuth, ChainView, PrevoutFact};
 pub use pin::AgentPin;
 pub use replay::{
     is_vault_change_only, outpoints_identical, outputs_commitment, psbt_content_hash, replay_id,
-    ReplayRecord, ReplayStore, ReplayVerdict,
+    ReplayPayload, ReplayRecord, ReplayStore, ReplayVerdict,
 };
 pub use structure::{
     parse_psbt_v0, require_all_vault_input_scripts, require_locktime_zero,

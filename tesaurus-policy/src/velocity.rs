@@ -6,6 +6,7 @@ use crate::error::{PolicyError, PolicyErrorCode, PolicyResult};
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct VelocitySample {
     /// Core B tip height at the time of a previous successful signature.
+    /// Production: record this from the agent's local store, not coordinator metadata.
     pub tip_height: u32,
     pub external_sats: u64,
 }

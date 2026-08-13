@@ -77,18 +77,59 @@ pub struct ReplayRecord {
     /// Never take this from request-supplied metadata.
     pub vault_script: ScriptBuf,
     pub outputs_commitment: [u8; 32],
-    pub signed_psbt_or_partial: Vec<u8>,
+    /// Signature payload. `evaluate` / [`ReplayRecord::from_pin`] always leave
+    /// this [`ReplayPayload::Unsigned`]. Only [`ReplayRecord::attach_signed`]
+    /// (after a future agent signature) or a previously committed record is
+    /// [`ReplayPayload::Signed`]. Do not broadcast `Unsigned`.
+    pub payload: ReplayPayload,
+}
+
+/// Distinguishes an unsigned policy candidate from a committed signature.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum ReplayPayload {
+    /// `evaluate` output. Not a co-sign. Do not broadcast.
+    Unsigned,
+    /// Cached or freshly attached signed PSBT / partial.
+    Signed(Vec<u8>),
+}
+
+impl ReplayPayload {
+    pub fn signed_bytes(&self) -> Option<&[u8]> {
+        match self {
+            Self::Unsigned => None,
+            Self::Signed(bytes) => Some(bytes),
+        }
+    }
+
+    fn to_store_hex(&self) -> String {
+        match self {
+            Self::Unsigned => String::new(),
+            Self::Signed(bytes) => hex::encode(bytes),
+        }
+    }
+
+    fn from_store_hex(hex_str: &str) -> PolicyResult<Self> {
+        if hex_str.is_empty() {
+            return Ok(Self::Unsigned);
+        }
+        let bytes = hex::decode(hex_str).map_err(|e| {
+            PolicyError::new(
+                PolicyErrorCode::Internal,
+                format!("corrupt signed payload hex: {e}"),
+            )
+        })?;
+        Ok(Self::Signed(bytes))
+    }
 }
 
 impl ReplayRecord {
     /// Construct a candidate from the pin and PSBT. `vault_script` is always
-    /// copied from `AgentPin`, never from request metadata.
+    /// copied from `AgentPin`. Payload is always [`ReplayPayload::Unsigned`].
     pub fn from_pin(
         pin: &AgentPin,
         request_id: [u8; 16],
         psbt: &Psbt,
         psbt_bytes: &[u8],
-        signed_psbt_or_partial: Vec<u8>,
     ) -> PolicyResult<Self> {
         let tx = &psbt.unsigned_tx;
         let psbt_txid = tx.compute_txid().to_byte_array();
@@ -103,8 +144,24 @@ impl ReplayRecord {
             outputs,
             vault_script: pin.script_pubkey().clone(),
             outputs_commitment,
-            signed_psbt_or_partial,
+            payload: ReplayPayload::Unsigned,
         })
+    }
+
+    /// Attach a non-empty signature before [`ReplayStore::commit`].
+    pub fn attach_signed(mut self, signed_psbt_or_partial: Vec<u8>) -> PolicyResult<Self> {
+        if signed_psbt_or_partial.is_empty() {
+            return Err(PolicyError::new(
+                PolicyErrorCode::Internal,
+                "attach_signed requires a non-empty signed PSBT / partial",
+            ));
+        }
+        self.payload = ReplayPayload::Signed(signed_psbt_or_partial);
+        Ok(self)
+    }
+
+    pub fn signed_bytes(&self) -> Option<&[u8]> {
+        self.payload.signed_bytes()
     }
 }
 
@@ -224,8 +281,14 @@ impl ReplayStore {
             .find(|r| r.request_id == candidate.request_id)
         {
             if existing.replay_id == candidate.replay_id {
+                let Some(bytes) = existing.signed_bytes() else {
+                    return Err(PolicyError::new(
+                        PolicyErrorCode::Internal,
+                        "idempotent replay record is missing a signed payload",
+                    ));
+                };
                 return Ok(ReplayVerdict::Idempotent {
-                    signed_psbt_or_partial: existing.signed_psbt_or_partial.clone(),
+                    signed_psbt_or_partial: bytes.to_vec(),
                 });
             }
             return Err(PolicyError::new(
@@ -271,12 +334,14 @@ impl ReplayStore {
                 signed_psbt_or_partial,
             }),
             ReplayVerdict::Fresh => {
+                require_signed_payload(&record)?;
                 self.records.push(record);
                 persist_records(&self.dir, &self.records)?;
                 fsync_dir(&self.dir)?;
                 Ok(ReplayVerdict::Fresh)
             }
             ReplayVerdict::FeeBump => {
+                require_signed_payload(&record)?;
                 self.records.push(record);
                 persist_records(&self.dir, &self.records)?;
                 fsync_dir(&self.dir)?;
@@ -284,6 +349,16 @@ impl ReplayStore {
             }
         }
     }
+}
+
+fn require_signed_payload(record: &ReplayRecord) -> PolicyResult<()> {
+    if matches!(record.payload, ReplayPayload::Unsigned) {
+        return Err(PolicyError::new(
+            PolicyErrorCode::Internal,
+            "cannot commit an unsigned record; attach_signed after co-signing",
+        ));
+    }
+    Ok(())
 }
 
 fn outpoints_overlap(a: &[OutPoint], b: &[OutPoint]) -> bool {
@@ -442,7 +517,7 @@ impl ReplayRecord {
                 .collect(),
             vault_script: hex::encode(self.vault_script.as_bytes()),
             outputs_commitment: hex::encode(self.outputs_commitment),
-            signed_psbt_or_partial: hex::encode(&self.signed_psbt_or_partial),
+            signed_psbt_or_partial: self.payload.to_store_hex(),
         }
     }
 
@@ -489,12 +564,7 @@ impl ReplayRecord {
             outputs,
             vault_script: ScriptBuf::from_bytes(vault_bytes),
             outputs_commitment: hex_array(&stored.outputs_commitment, "outputs_commitment")?,
-            signed_psbt_or_partial: hex::decode(&stored.signed_psbt_or_partial).map_err(|e| {
-                PolicyError::new(
-                    PolicyErrorCode::Internal,
-                    format!("corrupt signed payload hex: {e}"),
-                )
-            })?,
+            payload: ReplayPayload::from_store_hex(&stored.signed_psbt_or_partial)?,
         })
     }
 }
@@ -554,7 +624,7 @@ mod tests {
             outputs,
             vault_script: vault_script(),
             outputs_commitment,
-            signed_psbt_or_partial: payload.to_vec(),
+            payload: ReplayPayload::Signed(payload.to_vec()),
         }
     }
 
@@ -626,6 +696,17 @@ mod tests {
         store.commit(record(1, 1, 7, 1000, b"a")).unwrap();
         let err = store.commit(record(2, 9, 7, 2000, b"b")).unwrap_err();
         assert_eq!(err.code, PolicyErrorCode::Replay);
+    }
+
+    #[test]
+    fn commit_rejects_unsigned_payload() {
+        let tmp = tempfile::tempdir().unwrap();
+        let mut store = ReplayStore::init(tmp.path()).unwrap();
+        let mut rec = record(1, 1, 7, 1000, b"signed");
+        rec.payload = ReplayPayload::Unsigned;
+        let err = store.commit(rec).unwrap_err();
+        assert_eq!(err.code, PolicyErrorCode::Internal);
+        assert!(err.message.contains("unsigned"));
     }
 
     #[test]

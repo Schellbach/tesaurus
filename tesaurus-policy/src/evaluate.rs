@@ -4,6 +4,15 @@
 //! fail-closed. Follow-up: Core B RPC + agent-key signing behind a reviewed
 //! `--via-agent` unlock.
 //!
+//! [`PolicyOutcome::ValidatedUnsigned`] is **not** a co-sign: the replay payload
+//! is [`crate::replay::ReplayPayload::Unsigned`]. Only
+//! [`PolicyOutcome::Idempotent`] returns a cached signed PSBT. Callers must
+//! sign, [`ReplayRecord::attach_signed`], then `commit`.
+//!
+//! [`ChainView`] / [`AgentAuth`]: tests may lie via `from_test_facts` /
+//! `for_test_*`. Production must not; there is no public struct-literal and no
+//! `from_core_b` / MAC constructor yet.
+//!
 //! Normative order (protocol §6): AUTH → parse v0 → durable replay (D4/D5 store
 //! shape) → remaining structure → pin/witness match → foreign inputs →
 //! recovery path → CSV/wall-clock (from facts) → amounts → velocity → confirm.
@@ -12,7 +21,7 @@
 
 use bitcoin::psbt::Psbt;
 use bitcoin::transaction::Version;
-use bitcoin::{Amount, BlockHash, OutPoint, ScriptBuf, Transaction, TxOut};
+use bitcoin::{ScriptBuf, Transaction, TxOut};
 
 use crate::confirm::{
     genesis_internal_bytes, txid_display_bytes, verify_confirm_token, ConfirmBinding,
@@ -21,6 +30,7 @@ use crate::constants::MAX_POLICY_FEE_SATS;
 use crate::constants::MAX_POLICY_INPUTS;
 use crate::csv::check_csv_maturity;
 use crate::error::{PolicyError, PolicyErrorCode, PolicyResult};
+use crate::facts::{AgentAuth, ChainView};
 use crate::pin::AgentPin;
 use crate::replay::{
     is_vault_change_only, outpoints_identical, ReplayRecord, ReplayStore, ReplayVerdict,
@@ -31,33 +41,15 @@ use crate::structure::{
 };
 use crate::velocity::{check_velocity_cap, check_velocity_window_capped, VelocitySample};
 
+/// SignRequest fields used by policy. Not an auth oracle: pass [`AgentAuth`]
+/// separately. There is no `auth_ok: bool` here (a future agent must not
+/// forward a coordinator flag).
 #[derive(Debug, Clone)]
 pub struct PolicyRequest<'a> {
     pub request_id: [u8; 16],
     pub psbt_bytes: &'a [u8],
     pub confirm_token: Option<&'a [u8]>,
     pub claimed_external_sats: u64,
-    /// Caller (agent) verifies transport auth; policy fails closed if false.
-    pub auth_ok: bool,
-}
-
-/// Core B facts supplied by the caller. Policy never opens an RPC connection.
-#[derive(Debug, Clone)]
-pub struct ChainView {
-    pub genesis_hash: BlockHash,
-    pub tip_height: u32,
-    pub now_unix: u64,
-    pub prevouts: Vec<PrevoutFact>,
-}
-
-#[derive(Debug, Clone)]
-pub struct PrevoutFact {
-    pub outpoint: OutPoint,
-    pub value: Amount,
-    pub script_pubkey: ScriptBuf,
-    pub confirm_height: u32,
-    pub header_time_unix: u64,
-    pub visible_unspent: bool,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -71,11 +63,13 @@ pub struct AmountBreakdown {
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum PolicyOutcome {
-    /// Same `request_id` + `replay_id`: return the cached payload. Do not re-sign.
-    Idempotent { signed_psbt_or_partial: Vec<u8> },
-    /// Passed the full §6 machine. Caller may sign, then `ReplayStore::commit`.
-    /// `record.signed_psbt_or_partial` is empty until the caller fills it.
-    Accepted {
+    /// Same `request_id` + `replay_id`: return the cached **signed** payload.
+    /// This is the only evaluate path that yields bytes that may be broadcast
+    /// (they were signed on a previous success). Do not re-sign.
+    Idempotent { cached_signed_psbt: Vec<u8> },
+    /// Passed the full §6 machine. **Not signed. Not a co-sign. Do not broadcast.**
+    /// Sign (future agent), [`ReplayRecord::attach_signed`], then `commit`.
+    ValidatedUnsigned {
         verdict: ReplayVerdict,
         record: Box<ReplayRecord>,
         amounts: AmountBreakdown,
@@ -85,12 +79,13 @@ pub enum PolicyOutcome {
 pub fn evaluate(
     pin: &AgentPin,
     request: &PolicyRequest<'_>,
+    auth: AgentAuth,
     chain: &ChainView,
     store: &ReplayStore,
     velocity_samples: &[VelocitySample],
 ) -> PolicyResult<PolicyOutcome> {
-    // 6.1.1 Authentication
-    if !request.auth_ok {
+    // 6.1.1 Authentication — sealed mark, not a request bool
+    if !auth.is_ok() {
         return Err(PolicyError::new(
             PolicyErrorCode::Auth,
             "request authentication failed",
@@ -101,21 +96,15 @@ pub fn evaluate(
     let psbt = parse_psbt_v0(request.psbt_bytes)?;
     require_no_unknown_psbt_fields(&psbt)?;
 
-    // 6.1 durable replay — vault_script from pin, never from the request
-    let candidate = ReplayRecord::from_pin(
-        pin,
-        request.request_id,
-        &psbt,
-        request.psbt_bytes,
-        Vec::new(),
-    )?;
+    // 6.1 durable replay — vault_script from pin; payload always Unsigned
+    let candidate = ReplayRecord::from_pin(pin, request.request_id, &psbt, request.psbt_bytes)?;
     let verdict = store.preflight(&candidate)?;
     if let ReplayVerdict::Idempotent {
         signed_psbt_or_partial,
     } = verdict
     {
         return Ok(PolicyOutcome::Idempotent {
-            signed_psbt_or_partial,
+            cached_signed_psbt: signed_psbt_or_partial,
         });
     }
 
@@ -134,7 +123,7 @@ pub fn evaluate(
         return Err(PolicyError::new(
             PolicyErrorCode::Fee,
             format!(
-                "PSBT has {} inputs; cap is {MAX_POLICY_INPUTS}",
+                "PSBT has {} inputs; cap is {MAX_POLICY_INPUTS} (anti-DoS bound; no dedicated enumerable code)",
                 psbt.inputs.len()
             ),
         ));
@@ -165,7 +154,7 @@ pub fn evaluate(
     check_recovery_path(pin, &psbt)?;
 
     // 6.4 Core B CSV + wall-clock (facts only; no RPC)
-    if chain.genesis_hash != pin.genesis_hash() {
+    if chain.genesis_hash() != pin.genesis_hash() {
         return Err(PolicyError::new(
             PolicyErrorCode::WrongGenesis,
             "chain genesis does not match AgentPin",
@@ -183,7 +172,7 @@ pub fn evaluate(
             ),
         ));
     }
-    check_dust(&amounts)?;
+    check_dust(pin, &amounts)?;
 
     // D5 explicit policy (not a privileged skip) when the store carved out a bump
     if matches!(verdict, ReplayVerdict::FeeBump) {
@@ -199,7 +188,7 @@ pub fn evaluate(
     };
     check_velocity_window_capped(
         velocity_samples,
-        chain.tip_height,
+        chain.tip_height(),
         charged,
         pin.velocity_per_sig_sats(),
         pin.velocity_per_144_sats(),
@@ -208,7 +197,7 @@ pub fn evaluate(
     // 6.6b Confirm — external-only E; token rebound to this request_id + txid
     check_confirm(pin, request, &psbt, amounts.external_sats)?;
 
-    Ok(PolicyOutcome::Accepted {
+    Ok(PolicyOutcome::ValidatedUnsigned {
         verdict,
         record: Box::new(candidate),
         amounts,
@@ -322,7 +311,7 @@ fn classify_amounts(
     })
 }
 
-fn check_dust(amounts: &AmountBreakdown) -> PolicyResult<()> {
+fn check_dust(pin: &AgentPin, amounts: &AmountBreakdown) -> PolicyResult<()> {
     let external_dust = amounts.external_script.minimal_non_dust().to_sat();
     if amounts.external_sats < external_dust {
         return Err(PolicyError::new(
@@ -332,6 +321,18 @@ fn check_dust(amounts: &AmountBreakdown) -> PolicyResult<()> {
                 amounts.external_sats, external_dust
             ),
         ));
+    }
+    if amounts.change_sats > 0 {
+        let change_dust = pin.script_pubkey().minimal_non_dust().to_sat();
+        if amounts.change_sats < change_dust {
+            return Err(PolicyError::new(
+                PolicyErrorCode::Dust,
+                format!(
+                    "vault change {} is below dust {}",
+                    amounts.change_sats, change_dust
+                ),
+            ));
+        }
     }
     Ok(())
 }
@@ -400,28 +401,28 @@ fn check_chain_prevouts(
         .enumerate()
     {
         let fact = chain
-            .prevouts
+            .prevouts()
             .iter()
-            .find(|f| f.outpoint == txin.previous_output)
+            .find(|f| f.outpoint() == txin.previous_output)
             .ok_or_else(|| {
                 PolicyError::new(
                     PolicyErrorCode::PrevoutMissing,
                     format!("input {i} outpoint is not visible on Core B facts"),
                 )
             })?;
-        if !fact.visible_unspent {
+        if !fact.visible_unspent() {
             return Err(PolicyError::new(
                 PolicyErrorCode::ForeignInput,
                 format!("input {i} is not independently unspent on Core B"),
             ));
         }
-        if fact.script_pubkey != prevout.script_pubkey || fact.value != prevout.value {
+        if fact.script_pubkey() != &prevout.script_pubkey || fact.value() != prevout.value {
             return Err(PolicyError::new(
                 PolicyErrorCode::PrevoutMismatch,
                 format!("input {i} Core B prevout does not match PSBT"),
             ));
         }
-        if fact.script_pubkey != *pin.script_pubkey() {
+        if fact.script_pubkey() != pin.script_pubkey() {
             return Err(PolicyError::new(
                 PolicyErrorCode::ForeignInput,
                 format!("input {i} Core B script is not the pinned vault"),
@@ -459,15 +460,15 @@ fn check_recovery_path(pin: &AgentPin, psbt: &Psbt) -> PolicyResult<()> {
 fn check_csv_for_inputs(pin: &AgentPin, chain: &ChainView, psbt: &Psbt) -> PolicyResult<()> {
     for (i, txin) in psbt.unsigned_tx.input.iter().enumerate() {
         let fact = chain
-            .prevouts
+            .prevouts()
             .iter()
-            .find(|f| f.outpoint == txin.previous_output)
+            .find(|f| f.outpoint() == txin.previous_output)
             .expect("chain facts already required");
         check_csv_maturity(
-            chain.tip_height,
-            fact.confirm_height,
-            chain.now_unix,
-            fact.header_time_unix,
+            chain.tip_height(),
+            fact.confirm_height(),
+            chain.now_unix(),
+            fact.header_time_unix(),
             pin.csv_blocks(),
             pin.safety_margin(),
         )
@@ -560,12 +561,14 @@ pub fn enforce_fee_bump_policy(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::facts::PrevoutFact;
+    use crate::replay::ReplayPayload;
     use bitcoin::hashes::Hash;
     use bitcoin::psbt::{Psbt, PsbtSighashType};
     use bitcoin::secp256k1::{Message, Secp256k1, SecretKey};
     use bitcoin::sighash::EcdsaSighashType;
     use bitcoin::{absolute::LockTime, Network, PublicKey, Sequence, TxIn, Txid, Witness};
-    use bitcoin::{Address, CompressedPublicKey, PrivateKey};
+    use bitcoin::{Address, Amount, CompressedPublicKey, OutPoint, PrivateKey};
 
     struct Keys {
         secp: Secp256k1<bitcoin::secp256k1::All>,
@@ -711,23 +714,25 @@ mod tests {
         let tip = confirm_height + need - 1;
         let t0 = 1_700_000_000_u64;
         let now = t0 + u64::from(need) * pin.wall_clock_seconds_per_block();
-        ChainView {
-            genesis_hash: pin.genesis_hash(),
-            tip_height: tip,
-            now_unix: now,
-            prevouts: parts
+        ChainView::from_test_facts(
+            pin.genesis_hash(),
+            tip,
+            now,
+            parts
                 .ops
                 .iter()
-                .map(|op| PrevoutFact {
-                    outpoint: *op,
-                    value: Amount::from_sat(parts.value),
-                    script_pubkey: pin.script_pubkey().clone(),
-                    confirm_height,
-                    header_time_unix: t0,
-                    visible_unspent: true,
+                .map(|op| {
+                    PrevoutFact::from_test_facts(
+                        *op,
+                        Amount::from_sat(parts.value),
+                        pin.script_pubkey().clone(),
+                        confirm_height,
+                        t0,
+                        true,
+                    )
                 })
                 .collect(),
-        }
+        )
     }
 
     #[allow(clippy::too_many_arguments)]
@@ -748,8 +753,8 @@ mod tests {
                 psbt_bytes: bytes,
                 confirm_token: token,
                 claimed_external_sats: claimed,
-                auth_ok: true,
             },
+            AgentAuth::for_test_verified(),
             chain,
             store,
             samples,
@@ -774,8 +779,8 @@ mod tests {
                 psbt_bytes: bytes,
                 confirm_token: token,
                 claimed_external_sats: claimed,
-                auth_ok: true,
             },
+            AgentAuth::for_test_verified(),
             chain,
             store,
             &[],
@@ -783,13 +788,13 @@ mod tests {
         .unwrap_err()
     }
 
-    fn commit_accepted(store: &mut ReplayStore, outcome: PolicyOutcome, payload: &[u8]) {
+    fn commit_validated(store: &mut ReplayStore, outcome: PolicyOutcome, payload: &[u8]) {
         match outcome {
-            PolicyOutcome::Accepted { mut record, .. } => {
-                record.signed_psbt_or_partial = payload.to_vec();
-                store.commit(*record).unwrap();
+            PolicyOutcome::ValidatedUnsigned { record, .. } => {
+                let signed = (*record).attach_signed(payload.to_vec()).unwrap();
+                store.commit(signed).unwrap();
             }
-            other => panic!("expected Accepted, got {other:?}"),
+            other => panic!("expected ValidatedUnsigned, got {other:?}"),
         }
     }
 
@@ -819,13 +824,15 @@ mod tests {
             &[],
         );
         match out {
-            PolicyOutcome::Accepted {
+            PolicyOutcome::ValidatedUnsigned {
                 verdict,
                 record,
                 amounts,
             } => {
                 assert_eq!(verdict, ReplayVerdict::Fresh);
                 assert_eq!(record.vault_script, *pin.script_pubkey());
+                assert!(matches!(record.payload, ReplayPayload::Unsigned));
+                assert!(record.signed_bytes().is_none());
                 assert_eq!(amounts.external_sats, parts.external);
                 assert_eq!(amounts.change_sats, parts.change);
                 assert_eq!(amounts.fee_sats, parts.fee);
@@ -848,8 +855,8 @@ mod tests {
                 psbt_bytes: b"not-a-psbt",
                 confirm_token: None,
                 claimed_external_sats: 1,
-                auth_ok: false,
             },
+            AgentAuth::for_test_rejected(),
             &chain,
             &store,
             &[],
@@ -970,8 +977,7 @@ mod tests {
         );
         let foreign = dest_script();
         psbt.inputs[0].witness_utxo.as_mut().unwrap().script_pubkey = foreign.clone();
-        let mut chain = mature_chain(&pin, &parts);
-        chain.prevouts[0].script_pubkey = foreign;
+        let chain = mature_chain(&pin, &parts).with_test_prevout_script(0, foreign);
         let err = eval_err(
             &pin,
             &psbt.serialize(),
@@ -1068,7 +1074,7 @@ mod tests {
             Some(&token),
             &[],
         );
-        commit_accepted(&mut store, out, b"signed-1");
+        commit_validated(&mut store, out, b"signed-1");
 
         // Below-threshold external with huge change must not require confirm.
         let mut small = default_spend();
@@ -1121,7 +1127,7 @@ mod tests {
             None,
             &[],
         );
-        commit_accepted(&mut store, out, b"orig");
+        commit_validated(&mut store, out, b"orig");
 
         let mut bump = parts.clone();
         bump.change = parts.change - 500;
@@ -1134,7 +1140,7 @@ mod tests {
             Some(EcdsaSighashType::All),
         );
         let samples = [VelocitySample {
-            tip_height: chain.tip_height,
+            tip_height: chain.tip_height(),
             external_sats: parts.external,
         }];
         let outcome = eval_ok(
@@ -1148,7 +1154,7 @@ mod tests {
             &samples,
         );
         match &outcome {
-            PolicyOutcome::Accepted {
+            PolicyOutcome::ValidatedUnsigned {
                 verdict, amounts, ..
             } => {
                 assert_eq!(*verdict, ReplayVerdict::FeeBump);
@@ -1157,7 +1163,7 @@ mod tests {
             }
             PolicyOutcome::Idempotent { .. } => panic!("bump must not be idempotent"),
         }
-        commit_accepted(&mut store, outcome, b"bump");
+        commit_validated(&mut store, outcome, b"bump");
     }
 
     #[test]
@@ -1189,7 +1195,7 @@ mod tests {
             None,
             &[],
         );
-        commit_accepted(&mut store, out, b"orig");
+        commit_validated(&mut store, out, b"orig");
 
         let mut dropped = parts.clone();
         dropped.ops = vec![outpoint(7)];
@@ -1264,7 +1270,7 @@ mod tests {
             None,
             &[],
         );
-        commit_accepted(&mut store, orig, b"orig");
+        commit_validated(&mut store, orig, b"orig");
 
         let mut more_e = parts.clone();
         more_e.external = parts.external + 1;
@@ -1375,7 +1381,7 @@ mod tests {
             Some(&token1),
             &[],
         );
-        commit_accepted(&mut store, orig, b"orig");
+        commit_validated(&mut store, orig, b"orig");
 
         let mut bump = parts.clone();
         bump.change = parts.change - 500;
@@ -1406,7 +1412,7 @@ mod tests {
             genesis_internal: genesis_internal_bytes(pin.genesis_hash()),
         });
         let samples = [VelocitySample {
-            tip_height: chain.tip_height,
+            tip_height: chain.tip_height(),
             external_sats: parts.external,
         }];
         let outcome = eval_ok(
@@ -1420,7 +1426,7 @@ mod tests {
             &samples,
         );
         match outcome {
-            PolicyOutcome::Accepted { verdict, .. } => {
+            PolicyOutcome::ValidatedUnsigned { verdict, .. } => {
                 assert_eq!(verdict, ReplayVerdict::FeeBump);
             }
             PolicyOutcome::Idempotent { .. } => panic!("expected fee bump"),
@@ -1441,9 +1447,30 @@ mod tests {
             LockTime::ZERO,
             Some(EcdsaSighashType::All),
         );
-        let mut chain = mature_chain(&pin, &parts);
-        chain.tip_height = 10; // far too shallow
+        let chain = mature_chain(&pin, &parts).with_test_tip_height(10);
         let err = eval_err(&pin, &bytes, rid(1), parts.external, &chain, &store, None);
         assert_eq!(err.code, PolicyErrorCode::CsvImmatureDepth);
+    }
+
+    #[test]
+    fn vault_change_below_dust_is_rejected() {
+        let keys = Keys::new();
+        let pin = keys.pin();
+        let mut parts = default_spend();
+        parts.change = 1;
+        parts.external = parts.value - parts.change - parts.fee;
+        let tmp = tempfile::tempdir().unwrap();
+        let store = ReplayStore::init(tmp.path()).unwrap();
+        let (_p, bytes) = build_psbt(
+            &pin,
+            &parts,
+            Sequence::from_height(pin.csv_blocks() as u16),
+            LockTime::ZERO,
+            Some(EcdsaSighashType::All),
+        );
+        let chain = mature_chain(&pin, &parts);
+        let err = eval_err(&pin, &bytes, rid(1), parts.external, &chain, &store, None);
+        assert_eq!(err.code, PolicyErrorCode::Dust);
+        assert!(err.message.contains("vault change"));
     }
 }
