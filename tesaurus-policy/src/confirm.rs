@@ -13,9 +13,13 @@ use bitcoin::{BlockHash, PublicKey, Txid};
 
 use crate::error::{PolicyError, PolicyErrorCode, PolicyResult};
 
-/// ASCII domain separator. Spec comment said 18 bytes; the UTF-8 string is 19.
+/// ASCII domain separator. Locked length: **19 bytes** (not 18).
+/// Do not change the UTF-8 string; other implementations concatenate these bytes.
 pub const CONFIRM_DOMAIN: &[u8] = b"TESAURUS_CONFIRM_V1";
+pub const CONFIRM_DOMAIN_LEN: usize = 19;
 pub const CONFIRM_LAYOUT_VERSION: u8 = 1;
+
+const _: () = assert!(CONFIRM_DOMAIN.len() == CONFIRM_DOMAIN_LEN);
 
 /// External value at or above this requires a valid `confirm_token`.
 pub const OOB_CONFIRM_SATS: u64 = 5_000_000;
@@ -182,7 +186,8 @@ mod tests {
 
     #[test]
     fn preimage_matches_locked_hex() {
-        assert_eq!(CONFIRM_DOMAIN.len(), 19);
+        assert_eq!(CONFIRM_DOMAIN.len(), CONFIRM_DOMAIN_LEN);
+        assert_eq!(CONFIRM_DOMAIN_LEN, 19);
         let preimage = confirm_preimage(&vector_binding());
         assert_eq!(hex::encode(&preimage), vectors::PREIMAGE_HEX);
         assert_eq!(

@@ -1,12 +1,11 @@
 //! CSV depth and wall-clock maturity (pure functions).
 //!
 //! Depth: `tip_height - confirm_height + 1` must be `>= csv_blocks + safety_margin`.
-//! Wall-clock: `now_utc >= t_confirm + (csv_blocks * WALL_CLOCK_SECONDS_PER_BLOCK)`.
+//! Wall-clock: `now_utc >= t_confirm + (csv_blocks + safety_margin) * WALL_CLOCK_SECONDS_PER_BLOCK`.
 //!
-//! At 10 minutes/block, `csv_blocks + safety_margin` is **37 days** of chain
-//! growth (`(4320 + 1008) * 600 = 3_196_800` seconds). The wall-clock floor
-//! uses `csv_blocks * 600` only (~30 days) so eclipse-fast vs slow-block
-//! cases can fail independently. See `docs/THREAT_MODEL.md` invariant 6.
+//! Locked bound: `(4320 + 1008) * 600 = 3_196_800` seconds = **37 days**.
+//! Independent failure: fast fake blocks → depth OK, wall-clock short; slow
+//! real chain → wall-clock OK, depth short. See `docs/THREAT_MODEL.md` invariant 6.
 
 use crate::constants::WALL_CLOCK_SECONDS_PER_BLOCK;
 use crate::error::{PolicyError, PolicyErrorCode, PolicyResult};
@@ -31,27 +30,44 @@ pub fn csv_depth_is_mature(depth: u32, csv_blocks: u32, safety_margin: u32) -> b
     }
 }
 
-pub fn wall_clock_deadline_unix(t_confirm_unix: u64, csv_blocks: u32) -> PolicyResult<u64> {
-    t_confirm_unix
-        .checked_add(u64::from(csv_blocks).saturating_mul(WALL_CLOCK_SECONDS_PER_BLOCK))
+pub fn wall_clock_deadline_unix(
+    t_confirm_unix: u64,
+    csv_blocks: u32,
+    safety_margin: u32,
+) -> PolicyResult<u64> {
+    let blocks = csv_blocks.checked_add(safety_margin).ok_or_else(|| {
+        PolicyError::new(
+            PolicyErrorCode::CsvImmatureWallclock,
+            "csv_blocks + safety_margin overflow",
+        )
+    })?;
+    let delta = u64::from(blocks)
+        .checked_mul(WALL_CLOCK_SECONDS_PER_BLOCK)
         .ok_or_else(|| {
             PolicyError::new(
                 PolicyErrorCode::CsvImmatureWallclock,
-                "wall-clock deadline overflow",
+                "wall-clock duration overflow",
             )
-        })
+        })?;
+    t_confirm_unix.checked_add(delta).ok_or_else(|| {
+        PolicyError::new(
+            PolicyErrorCode::CsvImmatureWallclock,
+            "wall-clock deadline overflow",
+        )
+    })
 }
 
 pub fn wall_clock_is_mature(
     now_unix: u64,
     t_confirm_unix: u64,
     csv_blocks: u32,
+    safety_margin: u32,
 ) -> PolicyResult<bool> {
-    let deadline = wall_clock_deadline_unix(t_confirm_unix, csv_blocks)?;
+    let deadline = wall_clock_deadline_unix(t_confirm_unix, csv_blocks, safety_margin)?;
     Ok(now_unix >= deadline)
 }
 
-/// Both depth (csv + margin) and wall-clock (csv * 600s) must pass.
+/// Both depth and wall-clock must pass `(csv_blocks + safety_margin)` units.
 pub fn check_csv_maturity(
     tip_height: u32,
     confirm_height: u32,
@@ -67,11 +83,11 @@ pub fn check_csv_maturity(
             format!("depth {depth} < csv {csv_blocks} + margin {safety_margin}"),
         ));
     }
-    if !wall_clock_is_mature(now_unix, t_confirm_unix, csv_blocks)? {
+    if !wall_clock_is_mature(now_unix, t_confirm_unix, csv_blocks, safety_margin)? {
         return Err(PolicyError::new(
             PolicyErrorCode::CsvImmatureWallclock,
             format!(
-                "now {now_unix} < t_confirm {t_confirm_unix} + csv {csv_blocks} * {WALL_CLOCK_SECONDS_PER_BLOCK}"
+                "now {now_unix} < t_confirm {t_confirm_unix} + (csv {csv_blocks} + margin {safety_margin}) * {WALL_CLOCK_SECONDS_PER_BLOCK}"
             ),
         ));
     }
@@ -86,7 +102,7 @@ mod tests {
     const CSV: u32 = CSV_BLOCKS_DEFAULT;
     const MARGIN: u32 = SAFETY_MARGIN_BLOCKS;
     const NEED_DEPTH: u32 = CSV + MARGIN; // 5328
-    const NEED_SECS: u64 = CSV as u64 * WALL_CLOCK_SECONDS_PER_BLOCK; // 2_592_000
+    const NEED_SECS: u64 = (CSV as u64 + MARGIN as u64) * WALL_CLOCK_SECONDS_PER_BLOCK; // 3_196_800
 
     #[test]
     fn depth_off_by_one() {
@@ -102,14 +118,14 @@ mod tests {
     #[test]
     fn wall_clock_off_by_one() {
         let t0 = 1_700_000_000_u64;
-        assert!(!wall_clock_is_mature(t0 + NEED_SECS - 1, t0, CSV).unwrap());
-        assert!(wall_clock_is_mature(t0 + NEED_SECS, t0, CSV).unwrap());
-        assert!(wall_clock_is_mature(t0 + NEED_SECS + 1, t0, CSV).unwrap());
+        assert!(!wall_clock_is_mature(t0 + NEED_SECS - 1, t0, CSV, MARGIN).unwrap());
+        assert!(wall_clock_is_mature(t0 + NEED_SECS, t0, CSV, MARGIN).unwrap());
+        assert!(wall_clock_is_mature(t0 + NEED_SECS + 1, t0, CSV, MARGIN).unwrap());
     }
 
     #[test]
     fn depth_ok_wall_clock_fail() {
-        // Plenty of blocks (including margin) but wall-clock still short of csv*600.
+        // Fast fake blocks: depth includes margin, wall-clock still short of 37d.
         let confirm_height = 1;
         let tip = confirm_height + NEED_DEPTH - 1; // depth == 5328
         let t_confirm = 1_700_000_000_u64;
@@ -125,14 +141,14 @@ mod tests {
 
     #[test]
     fn wall_clock_ok_depth_fail() {
-        // Wall-clock past csv*600 but depth still one short of csv+margin.
+        // Slow real chain: 37d+ wall-clock elapsed, depth one short of csv+margin.
         let confirm_height = 10;
         let tip = confirm_height + (NEED_DEPTH - 1) - 1; // depth == 5327
         let t_confirm = 1_700_000_000_u64;
         let now = t_confirm + NEED_SECS + 86_400;
         let err = check_csv_maturity(tip, confirm_height, now, t_confirm, CSV, MARGIN).unwrap_err();
         assert_eq!(err.code, PolicyErrorCode::CsvImmatureDepth);
-        assert!(wall_clock_is_mature(now, t_confirm, CSV).unwrap());
+        assert!(wall_clock_is_mature(now, t_confirm, CSV, MARGIN).unwrap());
     }
 
     #[test]
@@ -149,5 +165,7 @@ mod tests {
         let seconds = (u64::from(CSV) + u64::from(MARGIN)) * WALL_CLOCK_SECONDS_PER_BLOCK;
         assert_eq!(seconds, 3_196_800);
         assert_eq!(seconds / 86_400, 37);
+        assert_eq!(NEED_SECS, 3_196_800);
+        assert_eq!(wall_clock_deadline_unix(0, CSV, MARGIN).unwrap(), 3_196_800);
     }
 }

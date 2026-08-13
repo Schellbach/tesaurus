@@ -143,7 +143,12 @@ with no signature. Replay insertion (D4) occurs before signing as specified.
    retry after a network drop). This is **not** a hard `REPLAY`.
 5. Same `request_id` + different `replay_id` → `REPLAY_CONFLICT`; do not sign.
 6. Same outpoints already signed with different outputs (any `request_id`) →
-   `REPLAY`.
+   `REPLAY`, **except** a D5 vault-change-only mutation: external destination
+   script and external amount `E` unchanged, no new external outputs, vault
+   change strictly decreased (fee increased). That shape is **not** `REPLAY` at
+   the store layer; full §8 policy still applies when fee-bump signing is
+   wired. Same outpoints with the same outputs (or any other output mutation)
+   remain `REPLAY`.
 7. First success: persist `{request_id, replay_id, psbt_txid, outpoints,
    signed_psbt_or_partial}` **before** returning Ok (fail closed if persist
    fails).
@@ -272,7 +277,13 @@ Fee-bumps / RBF replacements are **not** a privileged path.
    whose preimage binds this request’s `request_id` (uuid16) and txid
    (§15.1), not a reused token from a different binding.
 5. Replay: new `request_id` / content hash required; old ids remain
-   non-replayable for the vault lifetime.
+   non-replayable for the vault lifetime. Honest fee-bumps reuse spent
+   outpoints with a **vault-change-only** output mutation (same external
+   destination and `E`, lower vault change / higher fee, no extra externals).
+   The durable store must **not** treat that shape as outpoint `REPLAY`; it is
+   a D5 replacement that still runs the entire §6 machine. Diverting the
+   external, increasing `E`, adding outputs, or increasing change remains
+   `REPLAY`.
 
 Violations → `FEE_BUMP_DENIED` or the underlying stage code.
 
@@ -421,7 +432,7 @@ Aldo closed D1–D5 on 2026-08-11 as part of design acceptance.
 
 ```text
 preimage =
-    "TESAURUS_CONFIRM_V1"   # 18 bytes ASCII domain separator
+    "TESAURUS_CONFIRM_V1"   # 19 bytes ASCII domain separator (locked; do not treat as 18)
  || u8(1)                   # encoding version = 1
  || uuid16                  # request_id as 16 raw UUID bytes
  || txid32                  # transaction id, Bitcoin display/RPC byte order
@@ -445,9 +456,10 @@ txid endianness, wrong amount, wrong genesis, and a known-valid compact64.
 - Store: crash-safe durable KV or SQLite WAL (or equivalent). Indexed by
   `request_id` and spent outpoints; `replay_id` is
   `SHA256(request_id || psbt_txid || psbt_content_hash)`.
-- Value: `{ request_id, replay_id, psbt_txid, outpoints, signed_psbt_or_partial, … }`
+- Value: `{ request_id, replay_id, psbt_txid, outpoints, outputs, vault_script, signed_psbt_or_partial, … }`
   (see §6.1 R1: identical `replay_id` is idempotent; a different `replay_id` for
-  the same `request_id` is `REPLAY_CONFLICT`).
+  the same `request_id` is `REPLAY_CONFLICT`; D5 vault-change-only replacements
+  may share outpoints and are not `REPLAY`).
 - **Retention: vault lifetime.** While the current `AgentPin` / vault remains
   provisioned, do **not** time-prune replay records. Clearing the store is an
   explicit re-provision / vault-rotation ceremony, not a background job.

@@ -3,14 +3,15 @@
 /// Relative timelock on the agent branch (`older(csv)`).
 pub const CSV_BLOCKS_DEFAULT: u32 = 4320;
 
-/// Extra blocks required for CSV *depth* maturity (eclipse / header lag margin).
+/// Extra blocks for CSV depth **and** the wall-clock eclipse bound.
 pub const SAFETY_MARGIN_BLOCKS: u32 = 1008;
 
 /// Seconds charged per block for the wall-clock floor.
 ///
-/// Depth maturity uses `csv_blocks + safety_margin` (5328 blocks ≈ **37 days**
-/// at 10 minutes/block). The wall-clock helper is `csv_blocks * 600` seconds
-/// (30 days) so the two checks can fail independently (fast vs slow blocks).
+/// Both checks use `csv_blocks + safety_margin` (5328). Depth counts blocks;
+/// wall-clock counts `(csv_blocks + safety_margin) * 600` seconds (**37 days**).
+/// They still fail independently: fast fake blocks can satisfy depth while
+/// wall-clock is short; a slow real chain can satisfy wall-clock first.
 pub const WALL_CLOCK_SECONDS_PER_BLOCK: u64 = 600;
 
 /// Maximum external value per agent signature.

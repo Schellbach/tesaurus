@@ -9,7 +9,11 @@
 //! 1. First success: persist the record **before** returning Ok.
 //! 2. Same `request_id` + same `replay_id` → idempotent cached Ok (honest retry).
 //! 3. Same `request_id` + different `replay_id` → `REPLAY_CONFLICT`.
-//! 4. Same outpoints already signed with different outputs → `REPLAY`.
+//! 4. Same outpoints already signed with different outputs → `REPLAY`, except
+//!    a **D5 vault-change-only** mutation (external destination and amount
+//!    unchanged, vault change strictly decreased / fee increased, no new
+//!    external outputs). That shape is **not** `REPLAY`; full §8 policy still
+//!    runs when fee-bump signing is implemented.
 
 use std::collections::HashSet;
 use std::fs::{self, File, OpenOptions};
@@ -18,7 +22,7 @@ use std::path::{Path, PathBuf};
 
 use bitcoin::consensus::Encodable;
 use bitcoin::hashes::{sha256, Hash};
-use bitcoin::{OutPoint, TxOut};
+use bitcoin::{OutPoint, ScriptBuf, TxOut};
 use serde::{Deserialize, Serialize};
 
 use crate::error::{PolicyError, PolicyErrorCode, PolicyResult};
@@ -62,6 +66,10 @@ pub struct ReplayRecord {
     pub replay_id: [u8; 32],
     pub psbt_txid: [u8; 32],
     pub outpoints: Vec<OutPoint>,
+    /// Consensus outputs of the (to-be) signed transaction.
+    pub outputs: Vec<TxOut>,
+    /// Pinned vault script; used to classify change vs external for D5.
+    pub vault_script: ScriptBuf,
     pub outputs_commitment: [u8; 32],
     pub signed_psbt_or_partial: Vec<u8>,
 }
@@ -72,6 +80,9 @@ pub enum ReplayVerdict {
     Fresh,
     /// Honest retry: return the previously stored payload. Do not re-sign.
     Idempotent { signed_psbt_or_partial: Vec<u8> },
+    /// Same outpoints, vault-change-only (D5). Not `REPLAY`. Caller must still
+    /// run full §8 policy when fee-bump signing is wired; this crate does not sign.
+    FeeBump,
 }
 
 #[derive(Debug, Serialize, Deserialize)]
@@ -86,8 +97,16 @@ struct StoredRecord {
     replay_id: String,
     psbt_txid: String,
     outpoints: Vec<String>,
+    outputs: Vec<StoredTxOut>,
+    vault_script: String,
     outputs_commitment: String,
     signed_psbt_or_partial: String,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+struct StoredTxOut {
+    value_sats: u64,
+    script_pubkey: String,
 }
 
 #[derive(Debug)]
@@ -153,12 +172,6 @@ impl ReplayStore {
             .into_iter()
             .map(ReplayRecord::from_stored)
             .collect::<PolicyResult<Vec<_>>>()?;
-        if overlapping_outpoints_inconsistent(&records) {
-            return Err(PolicyError::new(
-                PolicyErrorCode::Internal,
-                "replay store outpoint index is inconsistent",
-            ));
-        }
         Ok(Self {
             dir: dir.to_path_buf(),
             records,
@@ -182,27 +195,35 @@ impl ReplayStore {
             ));
         }
 
+        let mut saw_fee_bump = false;
         for existing in &self.records {
-            if outpoints_overlap(&existing.outpoints, &candidate.outpoints)
-                && existing.outputs_commitment != candidate.outputs_commitment
-            {
-                return Err(PolicyError::new(
-                    PolicyErrorCode::Replay,
-                    "spent outpoints already signed with different outputs",
-                ));
+            if !outpoints_overlap(&existing.outpoints, &candidate.outpoints) {
+                continue;
             }
-            if outpoints_overlap(&existing.outpoints, &candidate.outpoints) {
+            if existing.outputs_commitment == candidate.outputs_commitment {
                 return Err(PolicyError::new(
                     PolicyErrorCode::Replay,
                     "spent outpoints already signed",
                 ));
             }
+            if is_vault_change_only(existing, candidate) {
+                saw_fee_bump = true;
+                continue;
+            }
+            return Err(PolicyError::new(
+                PolicyErrorCode::Replay,
+                "spent outpoints already signed with different outputs",
+            ));
+        }
+        if saw_fee_bump {
+            return Ok(ReplayVerdict::FeeBump);
         }
         Ok(ReplayVerdict::Fresh)
     }
 
     /// Persist `record` before the caller returns Ok. Idempotent retries return
-    /// the cached payload without rewriting a conflicting body.
+    /// the cached payload without rewriting a conflicting body. D5 vault-change-only
+    /// replacements persist as a new record (not `REPLAY`).
     pub fn commit(&mut self, record: ReplayRecord) -> PolicyResult<ReplayVerdict> {
         match self.preflight(&record)? {
             ReplayVerdict::Idempotent {
@@ -216,25 +237,64 @@ impl ReplayStore {
                 fsync_dir(&self.dir)?;
                 Ok(ReplayVerdict::Fresh)
             }
-        }
-    }
-}
-
-fn overlapping_outpoints_inconsistent(records: &[ReplayRecord]) -> bool {
-    let mut seen: HashSet<OutPoint> = HashSet::new();
-    for record in records {
-        for op in &record.outpoints {
-            if !seen.insert(*op) {
-                return true;
+            ReplayVerdict::FeeBump => {
+                self.records.push(record);
+                persist_records(&self.dir, &self.records)?;
+                fsync_dir(&self.dir)?;
+                Ok(ReplayVerdict::FeeBump)
             }
         }
     }
-    false
 }
 
 fn outpoints_overlap(a: &[OutPoint], b: &[OutPoint]) -> bool {
     let set: HashSet<_> = a.iter().copied().collect();
     b.iter().any(|op| set.contains(op))
+}
+
+struct ClassifiedOutputs {
+    external: TxOut,
+    change_sats: u64,
+}
+
+fn classify_outputs(outputs: &[TxOut], vault_script: &ScriptBuf) -> Option<ClassifiedOutputs> {
+    let mut externals = Vec::new();
+    let mut changes = Vec::new();
+    for output in outputs {
+        if output.script_pubkey == *vault_script {
+            changes.push(output);
+        } else {
+            externals.push(output);
+        }
+    }
+    if externals.len() != 1 || changes.len() > 1 {
+        return None;
+    }
+    Some(ClassifiedOutputs {
+        external: externals[0].clone(),
+        change_sats: changes.first().map(|c| c.value.to_sat()).unwrap_or(0),
+    })
+}
+
+/// D5 carve-out: same external destination and amount, vault change strictly
+/// decreased (fee increased), no new external outputs.
+fn is_vault_change_only(previous: &ReplayRecord, candidate: &ReplayRecord) -> bool {
+    if previous.vault_script != candidate.vault_script {
+        return false;
+    }
+    let Some(prev) = classify_outputs(&previous.outputs, &previous.vault_script) else {
+        return false;
+    };
+    let Some(cand) = classify_outputs(&candidate.outputs, &candidate.vault_script) else {
+        return false;
+    };
+    if prev.external.script_pubkey != cand.external.script_pubkey {
+        return false;
+    }
+    if prev.external.value != cand.external.value {
+        return false;
+    }
+    cand.change_sats < prev.change_sats
 }
 
 fn persist_records(dir: &Path, records: &[ReplayRecord]) -> PolicyResult<()> {
@@ -323,6 +383,15 @@ impl ReplayRecord {
             replay_id: hex::encode(self.replay_id),
             psbt_txid: hex::encode(self.psbt_txid),
             outpoints: self.outpoints.iter().map(ToString::to_string).collect(),
+            outputs: self
+                .outputs
+                .iter()
+                .map(|o| StoredTxOut {
+                    value_sats: o.value.to_sat(),
+                    script_pubkey: hex::encode(o.script_pubkey.as_bytes()),
+                })
+                .collect(),
+            vault_script: hex::encode(self.vault_script.as_bytes()),
             outputs_commitment: hex::encode(self.outputs_commitment),
             signed_psbt_or_partial: hex::encode(&self.signed_psbt_or_partial),
         }
@@ -341,11 +410,35 @@ impl ReplayRecord {
                 })
             })
             .collect::<PolicyResult<Vec<_>>>()?;
+        let outputs = stored
+            .outputs
+            .iter()
+            .map(|o| {
+                let script = hex::decode(&o.script_pubkey).map_err(|e| {
+                    PolicyError::new(
+                        PolicyErrorCode::Internal,
+                        format!("corrupt output script hex: {e}"),
+                    )
+                })?;
+                Ok(TxOut {
+                    value: bitcoin::Amount::from_sat(o.value_sats),
+                    script_pubkey: ScriptBuf::from_bytes(script),
+                })
+            })
+            .collect::<PolicyResult<Vec<_>>>()?;
+        let vault_bytes = hex::decode(&stored.vault_script).map_err(|e| {
+            PolicyError::new(
+                PolicyErrorCode::Internal,
+                format!("corrupt vault_script hex: {e}"),
+            )
+        })?;
         Ok(Self {
             request_id: hex_array(&stored.request_id, "request_id")?,
             replay_id: hex_array(&stored.replay_id, "replay_id")?,
             psbt_txid: hex_array(&stored.psbt_txid, "psbt_txid")?,
             outpoints,
+            outputs,
+            vault_script: ScriptBuf::from_bytes(vault_bytes),
             outputs_commitment: hex_array(&stored.outputs_commitment, "outputs_commitment")?,
             signed_psbt_or_partial: hex::decode(&stored.signed_psbt_or_partial).map_err(|e| {
                 PolicyError::new(
@@ -360,6 +453,8 @@ impl ReplayRecord {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use bitcoin::opcodes;
+    use bitcoin::script::Builder;
     use bitcoin::{Amount, ScriptBuf};
 
     fn outpoint(n: u32) -> OutPoint {
@@ -371,29 +466,72 @@ mod tests {
         }
     }
 
-    fn commitment(sats: u64) -> [u8; 32] {
-        let txout = TxOut {
-            value: Amount::from_sat(sats),
-            script_pubkey: ScriptBuf::new(),
-        };
-        outputs_commitment(&[txout]).unwrap()
+    fn dest_script() -> ScriptBuf {
+        Builder::new().push_opcode(opcodes::OP_TRUE).into_script()
     }
 
-    fn record(req: u8, replay: u8, op: u32, sats: u64, payload: &[u8]) -> ReplayRecord {
+    fn vault_script() -> ScriptBuf {
+        Builder::new()
+            .push_opcode(opcodes::all::OP_RETURN)
+            .into_script()
+    }
+
+    fn txout(sats: u64, script: ScriptBuf) -> TxOut {
+        TxOut {
+            value: Amount::from_sat(sats),
+            script_pubkey: script,
+        }
+    }
+
+    fn record_with_outputs(
+        req: u8,
+        replay: u8,
+        op: u32,
+        outputs: Vec<TxOut>,
+        payload: &[u8],
+    ) -> ReplayRecord {
         let mut request_id = [0u8; 16];
         request_id[0] = req;
         let mut replay_id = [0u8; 32];
         replay_id[0] = replay;
         let mut psbt_txid = [0u8; 32];
         psbt_txid[0] = req;
+        let outputs_commitment = outputs_commitment(&outputs).unwrap();
         ReplayRecord {
             request_id,
             replay_id,
             psbt_txid,
             outpoints: vec![outpoint(op)],
-            outputs_commitment: commitment(sats),
+            outputs,
+            vault_script: vault_script(),
+            outputs_commitment,
             signed_psbt_or_partial: payload.to_vec(),
         }
+    }
+
+    /// Single external output (no change). Different amounts are not D5.
+    fn record(req: u8, replay: u8, op: u32, external_sats: u64, payload: &[u8]) -> ReplayRecord {
+        record_with_outputs(
+            req,
+            replay,
+            op,
+            vec![txout(external_sats, dest_script())],
+            payload,
+        )
+    }
+
+    fn spend_with_change(
+        req: u8,
+        replay: u8,
+        external: u64,
+        change: u64,
+        payload: &[u8],
+    ) -> ReplayRecord {
+        let mut outputs = vec![txout(external, dest_script())];
+        if change > 0 {
+            outputs.push(txout(change, vault_script()));
+        }
+        record_with_outputs(req, replay, 7, outputs, payload)
     }
 
     #[test]
@@ -411,7 +549,6 @@ mod tests {
             }
         );
 
-        // Durable across reopen (crash / restart).
         drop(store);
         let store = ReplayStore::open(tmp.path()).unwrap();
         let again = store.preflight(&first).unwrap();
@@ -439,6 +576,32 @@ mod tests {
         store.commit(record(1, 1, 7, 1000, b"a")).unwrap();
         let err = store.commit(record(2, 9, 7, 2000, b"b")).unwrap_err();
         assert_eq!(err.code, PolicyErrorCode::Replay);
+    }
+
+    #[test]
+    fn d5_vault_change_only_is_not_outpoint_replay() {
+        let tmp = tempfile::tempdir().unwrap();
+        let mut store = ReplayStore::init(tmp.path()).unwrap();
+        store
+            .commit(spend_with_change(1, 1, 50_000, 20_000, b"orig"))
+            .unwrap();
+
+        let bump = spend_with_change(2, 9, 50_000, 15_000, b"bump");
+        assert_eq!(store.commit(bump).unwrap(), ReplayVerdict::FeeBump);
+
+        // Diverting the external amount is still REPLAY.
+        let diverted = spend_with_change(3, 3, 50_001, 14_999, b"divert");
+        assert_eq!(
+            store.preflight(&diverted).unwrap_err().code,
+            PolicyErrorCode::Replay
+        );
+
+        // Increasing change is not a fee-bump.
+        let raised = spend_with_change(4, 4, 50_000, 21_000, b"up");
+        assert_eq!(
+            store.preflight(&raised).unwrap_err().code,
+            PolicyErrorCode::Replay
+        );
     }
 
     #[test]
