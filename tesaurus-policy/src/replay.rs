@@ -63,6 +63,17 @@ pub fn outputs_commitment(outputs: &[TxOut]) -> PolicyResult<[u8; 32]> {
     Ok(sha256::Hash::hash(&buf).to_byte_array())
 }
 
+/// Durable replay candidate or committed spend.
+///
+/// Signature bytes are private. Outside this module the only mutator is
+/// [`ReplayRecord::attach_signed`] (non-empty). Do not assign
+/// [`ReplayPayload::Signed`] by field.
+///
+/// ```compile_fail
+/// fn stuff(record: &mut tesaurus_policy::ReplayRecord) {
+///     record.payload = tesaurus_policy::ReplayPayload::Signed(b"nope".to_vec());
+/// }
+/// ```
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ReplayRecord {
     pub request_id: [u8; 16],
@@ -77,11 +88,9 @@ pub struct ReplayRecord {
     /// Never take this from request-supplied metadata.
     pub vault_script: ScriptBuf,
     pub outputs_commitment: [u8; 32],
-    /// Signature payload. `evaluate` / [`ReplayRecord::from_pin`] always leave
-    /// this [`ReplayPayload::Unsigned`]. Only [`ReplayRecord::attach_signed`]
-    /// (after a future agent signature) or a previously committed record is
-    /// [`ReplayPayload::Signed`]. Do not broadcast `Unsigned`.
-    pub payload: ReplayPayload,
+    /// Signature payload. Private so callers cannot assign
+    /// [`ReplayPayload::Signed`] except via [`ReplayRecord::attach_signed`].
+    payload: ReplayPayload,
 }
 
 /// Distinguishes an unsigned policy candidate from a committed signature.
@@ -149,6 +158,8 @@ impl ReplayRecord {
     }
 
     /// Attach a non-empty signature before [`ReplayStore::commit`].
+    ///
+    /// This is the only public mutator for [`ReplayRecord::payload`].
     pub fn attach_signed(mut self, signed_psbt_or_partial: Vec<u8>) -> PolicyResult<Self> {
         if signed_psbt_or_partial.is_empty() {
             return Err(PolicyError::new(
@@ -158,6 +169,11 @@ impl ReplayRecord {
         }
         self.payload = ReplayPayload::Signed(signed_psbt_or_partial);
         Ok(self)
+    }
+
+    /// Current payload. `evaluate` / [`ReplayRecord::from_pin`] yield [`ReplayPayload::Unsigned`].
+    pub fn payload(&self) -> &ReplayPayload {
+        &self.payload
     }
 
     pub fn signed_bytes(&self) -> Option<&[u8]> {

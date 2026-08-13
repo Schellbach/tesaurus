@@ -831,8 +831,16 @@ mod tests {
             } => {
                 assert_eq!(verdict, ReplayVerdict::Fresh);
                 assert_eq!(record.vault_script, *pin.script_pubkey());
-                assert!(matches!(record.payload, ReplayPayload::Unsigned));
+                assert_eq!(record.payload(), &ReplayPayload::Unsigned);
                 assert!(record.signed_bytes().is_none());
+                let empty = record.clone().attach_signed(Vec::new()).unwrap_err();
+                assert_eq!(empty.code, PolicyErrorCode::Internal);
+                let signed = record.clone().attach_signed(b"partial".to_vec()).unwrap();
+                assert_eq!(
+                    signed.payload(),
+                    &ReplayPayload::Signed(b"partial".to_vec())
+                );
+                assert_eq!(signed.signed_bytes(), Some(b"partial".as_slice()));
                 assert_eq!(amounts.external_sats, parts.external);
                 assert_eq!(amounts.change_sats, parts.change);
                 assert_eq!(amounts.fee_sats, parts.fee);
@@ -1472,5 +1480,46 @@ mod tests {
         let err = eval_err(&pin, &bytes, rid(1), parts.external, &chain, &store, None);
         assert_eq!(err.code, PolicyErrorCode::Dust);
         assert!(err.message.contains("vault change"));
+    }
+
+    #[test]
+    fn attach_signed_from_outside_replay_module_requires_non_empty() {
+        let keys = Keys::new();
+        let pin = keys.pin();
+        let parts = default_spend();
+        let tmp = tempfile::tempdir().unwrap();
+        let store = ReplayStore::init(tmp.path()).unwrap();
+        let (_psbt, bytes) = build_psbt(
+            &pin,
+            &parts,
+            Sequence::from_height(pin.csv_blocks() as u16),
+            LockTime::ZERO,
+            Some(EcdsaSighashType::All),
+        );
+        let chain = mature_chain(&pin, &parts);
+        let out = eval_ok(
+            &pin,
+            &bytes,
+            rid(1),
+            parts.external,
+            &chain,
+            &store,
+            None,
+            &[],
+        );
+        let PolicyOutcome::ValidatedUnsigned { record, .. } = out else {
+            panic!("expected ValidatedUnsigned");
+        };
+        // evaluate.rs is outside replay.rs: no field assignment; only attach_signed.
+        assert_eq!(record.payload(), &ReplayPayload::Unsigned);
+        assert_eq!(
+            record.clone().attach_signed(Vec::new()).unwrap_err().code,
+            PolicyErrorCode::Internal
+        );
+        let signed = record.attach_signed(b"agent-partial".to_vec()).unwrap();
+        assert_eq!(
+            signed.payload(),
+            &ReplayPayload::Signed(b"agent-partial".to_vec())
+        );
     }
 }
